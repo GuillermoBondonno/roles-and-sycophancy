@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
+
+# Keep the directory placeholders, not generated experiment outputs.
+artifacts/*
+!artifacts/.gitkeep
+results/*
+!results/.gitkeep
