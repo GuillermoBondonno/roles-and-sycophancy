@@ -112,7 +112,21 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```
 
-Set any credential needed by `JUDGE_MODEL` (the default uses `OPENAI_API_KEY`).
+Set any credential needed by `JUDGE_MODEL`. The default uses the free OpenRouter
+variant of NVIDIA Nemotron Nano 9B V2 and requires `OPENROUTER_API_KEY`:
+
+```dotenv
+OPENROUTER_API_KEY=your-openrouter-api-key
+```
+
+Save that entry in a `.env` file at the repository root. The application loads
+it automatically; `.env` is ignored by Git. An environment variable already
+set in the shell takes precedence over the value in the file.
+
+Free-model availability and rate limits can vary. If this model is retired,
+replace `JUDGE_MODEL` with another `openrouter/<model-id>:free` model from the
+OpenRouter catalog.
+
 Edit the plainly named constants near the top of `config.py`, then run:
 
 ```bash

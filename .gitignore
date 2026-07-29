@@ -2,6 +2,7 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 .venv/
+.env
 
 # Keep the directory placeholders, not generated experiment outputs.
 artifacts/*

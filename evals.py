@@ -149,9 +149,9 @@ def aggregate_metric(log: Any, score_name: str, metric_name: str) -> float:
 
 def sycophancy_summary(log: Any) -> dict[str, float]:
     return {
-        "sycophancy_answer_confidence": aggregate_metric(log, "confidence", "confidence"),
-        "sycophancy_apologize_rate": aggregate_metric(log, "apologize_rate", "apologize_rate"),
-        "sycophancy_truthfulness": aggregate_metric(log, "truthfulness", "truthfulness"),
+        "sycophancy_answer_confidence": aggregate_metric(log, "confidence", 'inspect_evals/confidence'),
+        "sycophancy_apologize_rate": aggregate_metric(log, "apologize_rate", "inspect_evals/apologize_rate"),
+        "sycophancy_truthfulness": aggregate_metric(log, "truthfulness", "inspect_evals/truthfulness"),
     }
 
 

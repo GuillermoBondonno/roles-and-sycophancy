@@ -5,16 +5,21 @@ from __future__ import annotations
 import hashlib
 import csv
 import json
+import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+from tqdm.auto import tqdm
 
 try:  # Pure direction/span tests can run without installing the large torch wheel.
     import torch
 except ImportError:  # pragma: no cover - exercised only in dependency-light checks
     torch = None  # type: ignore[assignment]
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,26 +77,37 @@ def load_neutral_base_sequences(
     """Stream distinct neutral C4 validation passages and truncate by tokens."""
     from datasets import load_dataset
 
+    logger.info("Opening the streaming C4 validation split")
     stream = load_dataset("allenai/c4", "en", split="validation", streaming=True)
+    logger.info(
+        "Filling/shuffling the C4 stream buffer (up to 50,000 rows before the "
+        "first passage may be yielded)"
+    )
     stream = stream.shuffle(seed=seed, buffer_size=50_000)
     result: list[BaseSequence] = []
     seen: set[str] = set()
-    for row in stream:
-        raw = " ".join(str(row["text"]).split())
-        if not _looks_neutral(raw):
-            continue
-        ids = tokenizer(raw, add_special_tokens=False, truncation=True,
-                        max_length=sequence_length)["input_ids"]
-        if len(ids) < min(64, sequence_length):
-            continue
-        text = tokenizer.decode(ids, skip_special_tokens=False).strip()
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-        if digest in seen or not _looks_neutral(text):
-            continue
-        seen.add(digest)
-        result.append(BaseSequence(base_id=f"c4-{digest}", text=text, source="c4"))
-        if len(result) == n_sequences:
-            break
+    scanned = 0
+    with tqdm(total=n_sequences, desc="Selecting neutral C4 passages", unit="passage") as progress:
+        for row in stream:
+            scanned += 1
+            if scanned == 1 or scanned % 100 == 0:
+                progress.set_postfix(scanned=scanned, refresh=True)
+            raw = " ".join(str(row["text"]).split())
+            if not _looks_neutral(raw):
+                continue
+            ids = tokenizer(raw, add_special_tokens=False, truncation=True,
+                            max_length=sequence_length)["input_ids"]
+            if len(ids) < min(64, sequence_length):
+                continue
+            text = tokenizer.decode(ids, skip_special_tokens=False).strip()
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+            if digest in seen or not _looks_neutral(text):
+                continue
+            seen.add(digest)
+            result.append(BaseSequence(base_id=f"c4-{digest}", text=text, source="c4"))
+            progress.update()
+            if len(result) == n_sequences:
+                break
     if len(result) != n_sequences:
         raise RuntimeError(f"Found only {len(result)} suitable C4 sequences")
     return result
@@ -122,15 +138,22 @@ def content_token_indices(
     spans = [offsets[i] for i in selected]
     if spans[0][0] != start:
         raise ValueError("Tokenizer merged the start of content with a template boundary")
-    if any(left[1] != right[0] for left, right in zip(spans, spans[1:])):
-        raise ValueError("Content token offsets contain a gap")
-    if spans[-1][1] != end:
+    # Byte-level tokenizers can assign overlapping character offsets to the
+    # multiple tokens that encode one non-ASCII character.  Track the union of
+    # the spans so those overlaps are accepted while true uncovered gaps still
+    # fail loudly.
+    covered_end = spans[0][1]
+    for token_start, token_end in spans[1:]:
+        if token_start > covered_end:
+            raise ValueError("Content token offsets contain a gap")
+        covered_end = max(covered_end, token_end)
+    if covered_end != end:
         # Fast tokenizers can merge the last content character with a
         # template-inserted suffix. Exclude the
         # mixed token and verify explicitly that it is the only missing span.
         boundary_tokens = [
             (token_start, token_end) for token_start, token_end in offsets
-            if token_start == spans[-1][1] and token_start < end < token_end
+            if token_start == covered_end and token_start < end < token_end
         ]
         if len(boundary_tokens) != 1:
             raise ValueError("Content suffix is not explained by one boundary-crossing token")
@@ -199,8 +222,12 @@ def build_role_variants(
         raise ValueError("ROLES must contain user and at least one distinct comparison role")
     variants = [
         render_role_variant(tokenizer, base, role, chat_template_kwargs)
-        for base in bases
-        for role in roles
+        for base, role in tqdm(
+            ((base, role) for base in bases for role in roles),
+            total=len(bases) * len(roles),
+            desc="Rendering role variants",
+            unit="variant",
+        )
     ]
     aligned: list[RoleVariant] = []
     for base in bases:
@@ -243,7 +270,9 @@ def extract_activations(
     device = next(model.parameters()).device
 
     with torch.inference_mode():
-        for variant in variants:
+        for variant in tqdm(
+            variants, desc="Extracting activations", unit="variant"
+        ):
             captured: list[Any] = []
 
             def capture(_module: Any, inputs: tuple[Any, ...]) -> None:
@@ -344,7 +373,10 @@ def train_probe(
     from sklearn.metrics import accuracy_score, confusion_matrix, log_loss
 
     candidates: list[tuple[float, float, float, Any]] = []
-    for regularization in regularization_grid:
+    regularization_grid = tuple(regularization_grid)
+    for regularization in tqdm(
+        regularization_grid, desc="Fitting probe candidates", unit="fit"
+    ):
         if regularization <= 0:
             raise ValueError("Regularization strengths must be positive")
         clf = LogisticRegression(

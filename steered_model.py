@@ -123,9 +123,11 @@ def make_inspect_model(
         ModelAPI,
         ModelOutput,
         ModelUsage,
+        modelapi,
     )
     from inspect_ai.tool import ToolChoice, ToolInfo
 
+    @modelapi("local-steered")
     class LocalSteeredAPI(ModelAPI):
         def __init__(self) -> None:
             super().__init__(

@@ -6,4 +6,7 @@ numpy>=1.26
 scikit-learn>=1.5
 inspect-ai>=0.3.249,<0.4
 inspect-evals>=0.16.0,<0.17
+openai>=2,<3
+python-dotenv>=1,<2
+tqdm>=4.66,<5
 pytest>=8

@@ -30,6 +30,21 @@ def test_content_span_excludes_suffix_merged_with_template() -> None:
     assert content_token_indices(rendered, "alpha beta", offsets) == [1]
 
 
+def test_content_span_accepts_overlapping_byte_token_offsets() -> None:
+    rendered = "<role>a 辨 b</role>"
+    # Byte-level tokenizers can split one Unicode character into tokens whose
+    # character offsets overlap. Their union still covers the content exactly.
+    offsets = [(0, 6), (6, 8), (7, 8), (7, 8), (8, 10), (10, 17)]
+    assert content_token_indices(rendered, "a 辨 b", offsets) == [1, 2, 3, 4]
+
+
+def test_content_span_rejects_actual_uncovered_gap() -> None:
+    rendered = "<role>alpha beta</role>"
+    offsets = [(0, 6), (6, 11), (12, 16), (16, 23)]
+    with pytest.raises(ValueError, match="gap"):
+        content_token_indices(rendered, "alpha beta", offsets)
+
+
 def test_candidate_direction_is_centered_and_scaled_on_holdout() -> None:
     roles = ("user", "assistant", "tool")
     weights = np.array([[3.0, 1.0], [0.0, 1.0], [1.0, -1.0]])
