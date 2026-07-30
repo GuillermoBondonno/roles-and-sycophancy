@@ -127,6 +127,17 @@ Free-model availability and rate limits can vary. If this model is retired,
 replace `JUDGE_MODEL` with another `openrouter/<model-id>:free` model from the
 OpenRouter catalog.
 
+Transient judge failures do not become zero-valued observations. Inspect
+retries HTTP 429 and other retryable provider failures with exponential
+backoff. `MODEL_API_MAX_RETRIES` defaults to 5 retries after the initial
+request. If those retries are exhausted, that sample is recorded as an error
+in the raw Inspect log and evaluation continues; summary metrics use only the
+successfully scored samples. Evaluation remains serial (`max_samples=1`) to
+avoid creating a burst of judge requests. The run logs the completed/requested
+sample count for partial evaluations and refuses to produce a summary only when
+an evaluation has no usable samples at all. Increase or decrease
+`MODEL_API_MAX_RETRIES` in `config.py` to change this policy.
+
 Edit the plainly named constants near the top of `config.py`, then run:
 
 ```bash

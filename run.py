@@ -100,6 +100,32 @@ def coefficient_slug(coefficient: float) -> str:
     return f"{sign}{abs(coefficient):g}".replace(".", "p")
 
 
+def require_usable_eval(logs: list[Any], expected_samples: int, name: str) -> Any:
+    """Accept partial evals, but reject runs with no usable observations."""
+    if len(logs) != 1:
+        raise RuntimeError(f"{name} returned {len(logs)} logs; expected exactly one")
+    log = logs[0]
+    if log.status not in {"success", "error"}:
+        detail = f": {log.error.message}" if log.error is not None else ""
+        raise RuntimeError(f"{name} evaluation ended with status {log.status!r}{detail}")
+    if log.results is None:
+        raise RuntimeError(f"{name} evaluation completed without results")
+    completed = log.results.completed_samples
+    total = log.results.total_samples
+    if completed == 0:
+        raise RuntimeError(
+            f"{name} completed no usable samples out of {total}; "
+            "refusing to produce an empty summary"
+        )
+    if completed != expected_samples or total != expected_samples:
+        logger.warning(
+            "%s completed %d/%d samples (expected %d); summarizing successful "
+            "samples and discarding exhausted requests",
+            name, completed, total, expected_samples,
+        )
+    return log
+
+
 def run_evaluations(
     wrapper: SteeredModel,
     inspect_model: Any,
@@ -132,6 +158,15 @@ def run_evaluations(
             "max_tokens": config.MAX_NEW_TOKENS,
             "seed": config.SEED,
             "cache": False,
+            # Inspect retries retryable provider errors with exponential backoff.
+            "max_retries": config.MODEL_API_MAX_RETRIES,
+            "timeout": config.MODEL_API_TIMEOUT,
+            # Once request retries are exhausted, retain the error in the raw
+            # log and continue so metrics use the successful samples.
+            "retry_on_error": 0,
+            "task_retry_attempts": 0,
+            "fail_on_error": False,
+            "continue_on_fail": True,
             "metadata": {
                 "steering_coefficient": coefficient,
                 "target_layer": config.TARGET_LAYER,
@@ -140,18 +175,26 @@ def run_evaluations(
         }
         logger.info("alpha=%g: running sycophancy evaluation (%d samples)", coefficient,
                     sycophancy_limit)
-        syc_log = inspect_eval(
-            sycophancy(shuffle=False, scorer_model=config.JUDGE_MODEL),
-            limit=sycophancy_limit,
-            **common,
-        )[0]
+        syc_log = require_usable_eval(
+            inspect_eval(
+                sycophancy(shuffle=False, scorer_model=config.JUDGE_MODEL),
+                limit=sycophancy_limit,
+                **common,
+            ),
+            sycophancy_limit,
+            "sycophancy",
+        )
         logger.info("alpha=%g: running coherence evaluation (%d samples)", coefficient,
                     coherence_limit)
-        coherence_log = inspect_eval(
-            coherence_task(config.COHERENCE_DATASET, config.JUDGE_MODEL),
-            limit=coherence_limit,
-            **common,
-        )[0]
+        coherence_log = require_usable_eval(
+            inspect_eval(
+                coherence_task(config.COHERENCE_DATASET, config.JUDGE_MODEL),
+                limit=coherence_limit,
+                **common,
+            ),
+            coherence_limit,
+            "coherence",
+        )
         save_per_sample(
             syc_log, result_root / "per_sample" / f"sycophancy_alpha_{slug}.jsonl",
             coefficient, "sycophancy",
