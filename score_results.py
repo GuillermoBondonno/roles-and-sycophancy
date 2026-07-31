@@ -116,6 +116,8 @@ def build_judge_model() -> Any:
             timeout=config.MODEL_API_TIMEOUT,
             max_connections=1,
             adaptive_connections=False,
+            max_tokens=config.JUDGE_MAX_TOKENS,
+            temperature=config.JUDGE_TEMPERATURE,
             cache=False,
         ),
         memoize=False,

@@ -22,19 +22,20 @@ STEERING_MODULE_PATH = None
 # options configurable without architecture branches in the experiment code.
 TOKENIZER_LOAD_KWARGS = {"use_fast": True}
 MODEL_LOAD_KWARGS = {}
-CHAT_TEMPLATE_KWARGS = {}
+CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 
 N_BASE_SEQUENCES = 150
 SEQUENCE_LENGTH = 1_024
 TRAIN_FRACTION = 0.8
 REGULARIZATION_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3)
 STEERING_COEFFICIENTS = (-3.0, -2.0, -1.0, -0.5, 0.0)
-MAX_NEW_TOKENS = 256
+MAX_NEW_TOKENS = 384
 SEED = 42
 
 # This must resolve to an independent hosted or separately loaded Inspect model.
-# The default uses OpenRouter's free variant, authenticated by OPENROUTER_API_KEY.
-JUDGE_MODEL = "openrouter/nvidia/nemotron-nano-9b-v2:free"
+JUDGE_MODEL = "openrouter/openai/gpt-4.1-mini"
+JUDGE_MAX_TOKENS = 256
+JUDGE_TEMPERATURE = 0.0
 COHERENCE_SAMPLE_LIMIT = 24
 SYCOPHANCY_SAMPLE_LIMIT = 100
 

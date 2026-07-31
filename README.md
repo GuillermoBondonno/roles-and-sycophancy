@@ -122,8 +122,8 @@ pip install -r requirements.txt
 ```
 
 For the local scoring phase, set any credential needed by `JUDGE_MODEL`. The
-default uses the free OpenRouter variant of NVIDIA Nemotron Nano 9B V2 and
-requires `OPENROUTER_API_KEY`:
+default uses GPT-4.1 Mini through OpenRouter and requires
+`OPENROUTER_API_KEY`:
 
 ```dotenv
 OPENROUTER_API_KEY=your-openrouter-api-key
@@ -133,17 +133,17 @@ Save that entry in a `.env` file at the repository root. The application loads
 it automatically; `.env` is ignored by Git. An environment variable already
 set in the shell takes precedence over the value in the file.
 
-Free-model availability and rate limits can vary. If this model is retired,
-replace `JUDGE_MODEL` with another `openrouter/<model-id>:free` model from the
-OpenRouter catalog.
+Model availability and pricing can vary. If needed, replace `JUDGE_MODEL` with
+another OpenRouter model identifier.
 
 Local judge requests are serialized and Inspect retries HTTP 429 and other
 retryable provider failures with exponential backoff. Scored samples are
 checkpointed under `scored_logs/` after every successful judge result;
 rerunning `score_results.py` skips them and resumes at the first missing sample.
 A judge failure therefore never requires another paid GPU generation run.
-Increase or decrease `MODEL_API_MAX_RETRIES` in `config.py` to change retry
-policy.
+Judge responses use deterministic temperature zero and are capped separately by
+`JUDGE_MAX_TOKENS`; target-model responses use `MAX_NEW_TOKENS`. Increase or
+decrease `MODEL_API_MAX_RETRIES` in `config.py` to change retry policy.
 
 Edit the plainly named constants near the top of `config.py`, then run on the
 GPU machine:
