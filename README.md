@@ -84,9 +84,18 @@ supports the sycophancy task's second-turn “Are you sure?” interaction. Eval
 greedy cached generation, fixed prompts, fixed order, fixed seed, cache disabled,
 and concurrency one.
 
-The existing sycophancy task is used unchanged with
-`scorer_model=JUDGE_MODEL`. Its summary columns are answer confidence, apologize
-rate, and truthfulness. A fixed 24-prompt local Inspect task covers explanation,
+Generation and judging are separate phases. `run.py` uses the GPU only to fit
+the probe and generate both turns of every sycophancy conversation plus every
+coherence response for every coefficient. It calls Inspect with `score=False`,
+writes a portable generation manifest, and never contacts the judge. After the
+logs are downloaded, `score_results.py` applies the independent judge locally;
+it does not load or reconstruct the target model.
+
+The existing sycophancy scorer provides answer confidence, apologize rate, and
+truthfulness. The first two aggregates are recomputed from complete per-sample
+score dictionaries because Inspect Evals 0.16's registered conditional metrics
+incorrectly produce zero with current Inspect's named scalar reductions. A
+fixed 24-prompt local Inspect task covers explanation,
 supplied-text summarization, comparison, planning, argument, procedure, and
 passage continuation. An independent, unsteered judge scores grammar, local and
 global consistency, relevance, and non-degeneracy from 1–5. Its rubric excludes
@@ -112,8 +121,9 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```
 
-Set any credential needed by `JUDGE_MODEL`. The default uses the free OpenRouter
-variant of NVIDIA Nemotron Nano 9B V2 and requires `OPENROUTER_API_KEY`:
+For the local scoring phase, set any credential needed by `JUDGE_MODEL`. The
+default uses the free OpenRouter variant of NVIDIA Nemotron Nano 9B V2 and
+requires `OPENROUTER_API_KEY`:
 
 ```dotenv
 OPENROUTER_API_KEY=your-openrouter-api-key
@@ -127,21 +137,35 @@ Free-model availability and rate limits can vary. If this model is retired,
 replace `JUDGE_MODEL` with another `openrouter/<model-id>:free` model from the
 OpenRouter catalog.
 
-Transient judge failures do not become zero-valued observations. Inspect
-retries HTTP 429 and other retryable provider failures with exponential
-backoff. `MODEL_API_MAX_RETRIES` defaults to 5 retries after the initial
-request. If those retries are exhausted, that sample is recorded as an error
-in the raw Inspect log and evaluation continues; summary metrics use only the
-successfully scored samples. Evaluation remains serial (`max_samples=1`) to
-avoid creating a burst of judge requests. The run logs the completed/requested
-sample count for partial evaluations and refuses to produce a summary only when
-an evaluation has no usable samples at all. Increase or decrease
-`MODEL_API_MAX_RETRIES` in `config.py` to change this policy.
+Local judge requests are serialized and Inspect retries HTTP 429 and other
+retryable provider failures with exponential backoff. Scored samples are
+checkpointed under `scored_logs/` after every successful judge result;
+rerunning `score_results.py` skips them and resumes at the first missing sample.
+A judge failure therefore never requires another paid GPU generation run.
+Increase or decrease `MODEL_API_MAX_RETRIES` in `config.py` to change retry
+policy.
 
-Edit the plainly named constants near the top of `config.py`, then run:
+Edit the plainly named constants near the top of `config.py`, then run on the
+GPU machine:
 
 ```bash
 python run.py
+```
+
+Download the resulting `results/` directory to a local checkout with the same
+dependencies and run:
+
+```bash
+python score_results.py results
+```
+
+For Qwen models that expose a thinking-mode chat-template option, disable it in
+`CHAT_TEMPLATE_KWARGS` or provide a generation budget large enough for both the
+reasoning and final answer. A log of truncated `<think>` content is not a valid
+behavioral observation.
+
+```python
+CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 ```
 
 The default is a small, openly available instruct model so the pipeline is easy
@@ -176,7 +200,9 @@ artifacts/
   probe_diagnostics.json
   userness_steering_diagnostic.{csv,json}
 results/
-  inspect_logs/alpha_*/       # complete raw Inspect JSON logs
+  generation_manifest.json   # portable GPU-to-local handoff
+  inspect_logs/alpha_*/       # unscored target-model generation logs
+  scored_logs/alpha_*/        # locally judged Inspect logs
   per_sample/*.jsonl          # prompts, outputs, judge scores/metadata
   summary.csv
   summary.json

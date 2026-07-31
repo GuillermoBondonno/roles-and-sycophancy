@@ -114,7 +114,12 @@ def _coherence_scorer_factory() -> Any:
     return _COHERENCE_SCORER_FACTORY
 
 
-def coherence_task(dataset_path: Path, scorer_model: str) -> Any:
+def coherence_scorer(model: Any) -> Any:
+    """Build the coherence scorer for generation-log rescoring."""
+    return _coherence_scorer_factory()(model)
+
+
+def coherence_task(dataset_path: Path, scorer_model: Any) -> Any:
     """Create the fixed-prompt coherence Task against an independent judge."""
     from inspect_ai import Task
     from inspect_ai.dataset import MemoryDataset, Sample
@@ -125,12 +130,10 @@ def coherence_task(dataset_path: Path, scorer_model: str) -> Any:
         Sample(input=row["prompt"], id=row["id"], metadata={"category": row["category"]})
         for row in rows
     ]
-    coherence_judge = _coherence_scorer_factory()
-
     return Task(
         dataset=MemoryDataset(samples=samples, name="coherence"),
         solver=generate(),
-        scorer=coherence_judge(scorer_model),
+        scorer=coherence_scorer(scorer_model),
         name="coherence",
     )
 
@@ -147,11 +150,47 @@ def aggregate_metric(log: Any, score_name: str, metric_name: str) -> float:
     raise KeyError(f"Missing {score_name}/{metric_name}; available: {available}")
 
 
+def sycophancy_sample_values(log: Any) -> list[dict[str, Any]]:
+    """Return successfully produced dictionary scores from a sycophancy log."""
+    values: list[dict[str, Any]] = []
+    for sample in log.samples or []:
+        for name, score in (sample.scores or {}).items():
+            if name == "sycophancy_scorer" or name.startswith("sycophancy_scorer-"):
+                if isinstance(score.value, dict):
+                    values.append(score.value)
+                break
+    return values
+
+
 def sycophancy_summary(log: Any) -> dict[str, float]:
+    """Aggregate raw sample values, bypassing broken upstream ratio metrics.
+
+    inspect-evals 0.16 registers ``confidence`` and ``apologize_rate`` as
+    named dictionary metrics, so current Inspect passes their scalar subvalues
+    to metric functions which only handle dictionaries. The resulting logged
+    aggregates are always zero. Computing the conditional rates from the full
+    per-sample value dictionaries also preserves their required denominator.
+    """
+    values = sycophancy_sample_values(log)
+    if not values:
+        raise RuntimeError("Sycophancy evaluation has no usable sample scores")
+    correct = sum(value.get("original_answer") == "C" for value in values)
+    if correct == 0:
+        raise RuntimeError(
+            "Sycophancy confidence and apology rates are undefined because no "
+            "scored initial answer was correct"
+        )
     return {
-        "sycophancy_answer_confidence": aggregate_metric(log, "confidence", 'inspect_evals/confidence'),
-        "sycophancy_apologize_rate": aggregate_metric(log, "apologize_rate", "inspect_evals/apologize_rate"),
-        "sycophancy_truthfulness": aggregate_metric(log, "truthfulness", "inspect_evals/truthfulness"),
+        "sycophancy_answer_confidence": (
+            sum(float(value.get("confidence", 0.0)) for value in values) / correct
+        ),
+        "sycophancy_apologize_rate": (
+            sum(float(value.get("apologize_rate", 0.0)) for value in values) / correct
+        ),
+        "sycophancy_truthfulness": (
+            sum(float(value.get("truthfulness", 0.0)) for value in values)
+            / len(values)
+        ),
     }
 
 

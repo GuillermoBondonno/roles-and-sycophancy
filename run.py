@@ -1,8 +1,7 @@
-"""Train once, steer one loaded model, and run identical Inspect evals."""
+"""Train once, steer one loaded model, and save unscored Inspect generations."""
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 from pathlib import Path
@@ -13,7 +12,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 import config
-from evals import coherence_summary, coherence_task, save_per_sample, sycophancy_summary
+from evals import coherence_task
 from model_adapter import resolve_steering_site
 from probe import (
     build_role_variants,
@@ -100,46 +99,48 @@ def coefficient_slug(coefficient: float) -> str:
     return f"{sign}{abs(coefficient):g}".replace(".", "p")
 
 
-def require_usable_eval(logs: list[Any], expected_samples: int, name: str) -> Any:
-    """Accept partial evals, but reject runs with no usable observations."""
+def require_generated_eval(logs: list[Any], expected_samples: int, name: str) -> Any:
+    """Accept a generation-only log if it contains at least one usable response."""
     if len(logs) != 1:
         raise RuntimeError(f"{name} returned {len(logs)} logs; expected exactly one")
     log = logs[0]
     if log.status not in {"success", "error"}:
         detail = f": {log.error.message}" if log.error is not None else ""
-        raise RuntimeError(f"{name} evaluation ended with status {log.status!r}{detail}")
-    if log.results is None:
-        raise RuntimeError(f"{name} evaluation completed without results")
-    completed = log.results.completed_samples
-    total = log.results.total_samples
+        raise RuntimeError(f"{name} generation ended with status {log.status!r}{detail}")
+    samples = log.samples or []
+    completed = sum(
+        sample.error is None
+        and sample.output is not None
+        and bool(sample.output.completion)
+        for sample in samples
+    )
     if completed == 0:
         raise RuntimeError(
-            f"{name} completed no usable samples out of {total}; "
-            "refusing to produce an empty summary"
+            f"{name} generated no usable responses out of {len(samples)} samples"
         )
-    if completed != expected_samples or total != expected_samples:
+    if completed != expected_samples or len(samples) != expected_samples:
         logger.warning(
-            "%s completed %d/%d samples (expected %d); summarizing successful "
-            "samples and discarding exhausted requests",
-            name, completed, total, expected_samples,
+            "%s generated %d/%d usable responses (expected %d)",
+            name, completed, len(samples), expected_samples,
         )
     return log
 
 
-def run_evaluations(
+def run_generations(
     wrapper: SteeredModel,
     inspect_model: Any,
     coefficients: tuple[float, ...],
     result_root: Path,
     sycophancy_limit: int,
     coherence_limit: int,
-) -> list[dict[str, float]]:
+) -> list[dict[str, Any]]:
+    """Generate and persist all target-model responses without judge calls."""
     from inspect_ai import eval as inspect_eval
     from inspect_evals.sycophancy import sycophancy
 
-    rows: list[dict[str, float]] = []
+    manifest: list[dict[str, Any]] = []
     for coefficient in tqdm(
-        coefficients, desc="Evaluating steering coefficients", unit="coefficient"
+        coefficients, desc="Generating steering coefficients", unit="coefficient"
     ):
         wrapper.coefficient = float(coefficient)
         slug = coefficient_slug(coefficient)
@@ -147,7 +148,7 @@ def run_evaluations(
         common = {
             "model": inspect_model,
             "log_dir": str(log_dir),
-            "log_format": "json",
+            "log_format": "eval",
             "log_samples": True,
             "display": "plain",
             "max_samples": 1,
@@ -158,11 +159,6 @@ def run_evaluations(
             "max_tokens": config.MAX_NEW_TOKENS,
             "seed": config.SEED,
             "cache": False,
-            # Inspect retries retryable provider errors with exponential backoff.
-            "max_retries": config.MODEL_API_MAX_RETRIES,
-            "timeout": config.MODEL_API_TIMEOUT,
-            # Once request retries are exhausted, retain the error in the raw
-            # log and continue so metrics use the successful samples.
             "retry_on_error": 0,
             "task_retry_attempts": 0,
             "fail_on_error": False,
@@ -173,54 +169,64 @@ def run_evaluations(
                 "activation_site": wrapper.activation_site,
             },
         }
-        logger.info("alpha=%g: running sycophancy evaluation (%d samples)", coefficient,
-                    sycophancy_limit)
-        syc_log = require_usable_eval(
+        logger.info(
+            "alpha=%g: generating sycophancy responses (%d samples)",
+            coefficient,
+            sycophancy_limit,
+        )
+        syc_log = require_generated_eval(
             inspect_eval(
-                sycophancy(shuffle=False, scorer_model=config.JUDGE_MODEL),
+                # Inspect constructs task scorers even when score=False. Give it
+                # the already loaded local model so GPU generation requires no
+                # hosted-judge credentials; local rescoring replaces the scorer.
+                sycophancy(shuffle=False, scorer_model=inspect_model),
                 limit=sycophancy_limit,
+                score=False,
                 **common,
             ),
             sycophancy_limit,
             "sycophancy",
         )
-        logger.info("alpha=%g: running coherence evaluation (%d samples)", coefficient,
-                    coherence_limit)
-        coherence_log = require_usable_eval(
+        logger.info(
+            "alpha=%g: generating coherence responses (%d samples)",
+            coefficient,
+            coherence_limit,
+        )
+        coherence_log = require_generated_eval(
             inspect_eval(
-                coherence_task(config.COHERENCE_DATASET, config.JUDGE_MODEL),
+                coherence_task(config.COHERENCE_DATASET, inspect_model),
                 limit=coherence_limit,
+                score=False,
                 **common,
             ),
             coherence_limit,
             "coherence",
         )
-        save_per_sample(
-            syc_log, result_root / "per_sample" / f"sycophancy_alpha_{slug}.jsonl",
-            coefficient, "sycophancy",
+        for evaluation, log in (
+            ("sycophancy", syc_log),
+            ("coherence", coherence_log),
+        ):
+            location = Path(log.location) if log.location is not None else None
+            try:
+                portable_location = str(
+                    location.resolve().relative_to(result_root.resolve())
+                )
+            except (AttributeError, ValueError):
+                portable_location = str(location) if location is not None else None
+            manifest.append(
+                {
+                    "coefficient": float(coefficient),
+                    "evaluation": evaluation,
+                    "log": portable_location,
+                    "samples": len(log.samples or []),
+                }
+            )
+        result_root.mkdir(parents=True, exist_ok=True)
+        (result_root / "generation_manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
-        save_per_sample(
-            coherence_log, result_root / "per_sample" / f"coherence_alpha_{slug}.jsonl",
-            coefficient, "coherence",
-        )
-        rows.append({
-            "coefficient": float(coefficient),
-            **sycophancy_summary(syc_log),
-            **coherence_summary(coherence_log),
-        })
-    return rows
-
-
-def save_summary(rows: list[dict[str, float]], directory: Path, stem: str = "summary") -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{stem}.json").write_text(
-        json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    if rows:
-        with (directory / f"{stem}.csv").open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-            writer.writeheader()
-            writer.writerows(rows)
+    return manifest
 
 
 def main() -> None:
@@ -341,35 +347,33 @@ def main() -> None:
         config.TEMPERATURE, config.TOP_P, config.SEED,
         config.CHAT_TEMPLATE_KWARGS,
     )
-    started = log_stage("Stage 7/7: running behavioral evaluations")
-    primary_rows = run_evaluations(
+    started = log_stage("Stage 7/7: generating behavioral-evaluation responses")
+    run_generations(
         wrapper, inspect_model, config.STEERING_COEFFICIENTS,
         config.RESULTS_DIR, config.SYCOPHANCY_SAMPLE_LIMIT,
         config.COHERENCE_SAMPLE_LIMIT,
     )
-    save_summary(primary_rows, config.RESULTS_DIR)
     log_stage_done("Stage 7/7", started)
 
     if config.RUN_RANDOM_DIRECTION_CONTROL:
         primary = wrapper.unit_direction.clone()
         try:
             wrapper.unit_direction = equal_norm_random_direction(primary, config.SEED)
-            random_rows = run_evaluations(
+            run_generations(
                 wrapper, inspect_model, config.STEERING_COEFFICIENTS,
                 config.RESULTS_DIR / "random_direction_control",
                 min(config.SYCOPHANCY_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
                 min(config.COHERENCE_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
-            )
-            save_summary(
-                random_rows, config.RESULTS_DIR / "random_direction_control",
-                stem="random_direction_summary",
             )
         finally:
             wrapper.unit_direction = primary
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    logger.info("Experiment complete. Results are in %s", config.RESULTS_DIR)
+    logger.info(
+        "GPU generation complete. Download %s and run `python score_results.py` locally",
+        config.RESULTS_DIR,
+    )
 
 
 if __name__ == "__main__":

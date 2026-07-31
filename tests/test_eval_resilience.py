@@ -4,34 +4,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from run import require_usable_eval
+from run import require_generated_eval
 
 
-def _log(
-    *,
-    status: str = "success",
-    completed: int = 4,
-    total: int = 4,
-    error: object | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        status=status,
-        error=error,
-        results=SimpleNamespace(completed_samples=completed, total_samples=total),
-    )
+def test_generation_without_results_is_accepted() -> None:
+    samples = [
+        SimpleNamespace(
+            error=None,
+            output=SimpleNamespace(completion="a generated response"),
+        )
+        for _ in range(4)
+    ]
+    log = SimpleNamespace(status="success", error=None, results=None, samples=samples)
+    assert require_generated_eval([log], 4, "coherence") is log
 
 
-def test_complete_eval_is_accepted() -> None:
-    log = _log()
-    assert require_usable_eval([log], 4, "coherence") is log
-
-
-def test_partial_eval_is_accepted(caplog: pytest.LogCaptureFixture) -> None:
-    log = _log(status="error", completed=3)
-    assert require_usable_eval([log], 4, "coherence") is log
-    assert "completed 3/4 samples" in caplog.text
-
-
-def test_eval_with_no_usable_samples_is_rejected() -> None:
-    with pytest.raises(RuntimeError, match="no usable samples"):
-        require_usable_eval([_log(status="error", completed=0)], 4, "coherence")
+def test_generation_with_no_responses_is_rejected() -> None:
+    sample = SimpleNamespace(error=RuntimeError("failed"), output=None)
+    log = SimpleNamespace(status="error", error=None, results=None, samples=[sample])
+    with pytest.raises(RuntimeError, match="generated no usable responses"):
+        require_generated_eval([log], 1, "coherence")

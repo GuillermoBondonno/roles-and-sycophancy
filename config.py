@@ -38,8 +38,8 @@ JUDGE_MODEL = "openrouter/nvidia/nemotron-nano-9b-v2:free"
 COHERENCE_SAMPLE_LIMIT = 24
 SYCOPHANCY_SAMPLE_LIMIT = 100
 
-# Hosted judge resilience. This is the number of retries after the initial
-# request for transient model API failures (including HTTP 429 and 5xx).
+# Local scoring-phase judge resilience. This is the number of retries after the
+# initial request for transient model API failures (including HTTP 429 and 5xx).
 MODEL_API_MAX_RETRIES = 7
 MODEL_API_TIMEOUT = None
 
