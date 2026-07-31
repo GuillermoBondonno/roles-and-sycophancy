@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from pathlib import Path
@@ -18,6 +19,7 @@ from probe import (
     build_role_variants,
     extract_activations,
     load_neutral_base_sequences,
+    load_probe,
     save_probe,
     seed_everything,
     split_base_ids,
@@ -232,6 +234,17 @@ def run_generations(
 def main() -> None:
     import torch
 
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Skip Stages 3-6 and reuse the probe saved in ARTIFACTS_DIR, jumping "
+            "straight to behavioral generation (Stage 7)."
+        ),
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -253,78 +266,106 @@ def main() -> None:
     logger.info("Using steering site: %s", steering_site.activation_site)
     log_stage_done("Stage 2/7", started)
 
-    started = log_stage("Stage 3/7: selecting neutral C4 base passages")
-    bases = load_neutral_base_sequences(
-        tokenizer, config.N_BASE_SEQUENCES, config.SEQUENCE_LENGTH, config.SEED
-    )
-    log_stage_done("Stage 3/7", started)
-    # This split intentionally occurs before any role copy is constructed.
-    train_ids, validation_ids = split_base_ids(bases, config.TRAIN_FRACTION, config.SEED)
-    started = log_stage("Stage 4/7: rendering role variants")
-    variants = build_role_variants(
-        tokenizer, bases, config.ROLES, config.CHAT_TEMPLATE_KWARGS
-    )
-    log_stage_done("Stage 4/7", started)
-    started = log_stage("Stage 5/7: extracting model activations")
-    x, y, activation_metadata = extract_activations(
-        model, variants, steering_site.module, config.ROLES,
-        config.MAX_PROBE_TOKENS_PER_BASE_ROLE,
-    )
-    log_stage_done("Stage 5/7", started)
-    train_mask = np.asarray([row["base_id"] in train_ids for row in activation_metadata])
-    validation_mask = np.asarray([
-        row["base_id"] in validation_ids for row in activation_metadata
-    ])
-    if np.any(train_mask & validation_mask) or not np.all(train_mask | validation_mask):
-        raise AssertionError("Invalid base-level probe split")
-    for row, in_train in zip(activation_metadata, train_mask.tolist()):
-        row["split"] = "train" if in_train else "validation"
-
-    started = log_stage("Stage 6/7: fitting and validating the role probe")
-    artifact, diagnostics = train_probe(
-        x[train_mask], y[train_mask], x[validation_mask], y[validation_mask],
-        config.ROLES, config.REGULARIZATION_GRID,
-        config.STEERING_COEFFICIENTS, config.SEED,
-    )
-    log_stage_done("Stage 6/7", started)
-    metadata = {
-        "model_id": config.MODEL_NAME,
-        "target_layer": config.TARGET_LAYER,
-        "activation_site": steering_site.activation_site,
-        "steering_module_path": steering_site.module_path,
-        "roles": list(config.ROLES),
-        "role_order": list(config.ROLES),
-        "n_base_sequences": config.N_BASE_SEQUENCES,
-        "sequence_length": config.SEQUENCE_LENGTH,
-        "train_fraction": config.TRAIN_FRACTION,
-        "max_probe_tokens_per_base_role": config.MAX_PROBE_TOKENS_PER_BASE_ROLE,
-        "direction_formula": "w_user - mean(w_non_user)",
-        "direction_normalization": "L2 unit norm",
-        "direction_scale": "sample std (ddof=1) of held-out projections",
-        "projection_scale": float(artifact["projection_scale"]),
-        "seed": config.SEED,
-        "steering_coefficients": list(config.STEERING_COEFFICIENTS),
-        "judge_model": config.JUDGE_MODEL,
-        "sycophancy_sample_limit": config.SYCOPHANCY_SAMPLE_LIMIT,
-        "coherence_sample_limit": config.COHERENCE_SAMPLE_LIMIT,
-    }
-    save_probe(
-        config.ARTIFACTS_DIR, artifact, diagnostics, metadata, activation_metadata
-    )
-    if not diagnostics["userness_diagnostic_monotonic"]:
-        raise RuntimeError(
-            "Held-out mean Userness was not monotonic across coefficients; "
-            "diagnostics were saved, and behavioral evaluation was stopped"
+    if args.resume:
+        logger.info(
+            "Resuming from saved probe in %s; skipping Stages 3-6",
+            config.ARTIFACTS_DIR,
         )
-    write_jsonl(config.ARTIFACTS_DIR / "base_sequences.jsonl", [
-        {
-            "base_id": base.base_id,
-            "source": base.source,
-            "text": base.text,
-            "split": "train" if base.base_id in train_ids else "validation",
+        artifact, diagnostics = load_probe(config.ARTIFACTS_DIR)
+        # The saved flag may predate the ascending-coefficient ordering fix, so
+        # recompute monotonicity from the stored diagnostic rows.
+        rows = sorted(
+            diagnostics["userness_steering_diagnostic"],
+            key=lambda item: item["coefficient"],
+        )
+        means = [row["mean_userness"] for row in rows]
+        monotonic = all(
+            right >= left - 1e-10 for left, right in zip(means, means[1:])
+        )
+        if not monotonic:
+            raise RuntimeError(
+                "Saved probe diagnostics report non-monotonic Userness; refusing to "
+                "resume. Re-fit the probe or inspect the diagnostics first."
+            )
+    else:
+        started = log_stage("Stage 3/7: selecting neutral C4 base passages")
+        bases = load_neutral_base_sequences(
+            tokenizer, config.N_BASE_SEQUENCES, config.SEQUENCE_LENGTH, config.SEED
+        )
+        log_stage_done("Stage 3/7", started)
+        # This split intentionally occurs before any role copy is constructed.
+        train_ids, validation_ids = split_base_ids(
+            bases, config.TRAIN_FRACTION, config.SEED
+        )
+        started = log_stage("Stage 4/7: rendering role variants")
+        variants = build_role_variants(
+            tokenizer, bases, config.ROLES, config.CHAT_TEMPLATE_KWARGS
+        )
+        log_stage_done("Stage 4/7", started)
+        started = log_stage("Stage 5/7: extracting model activations")
+        x, y, activation_metadata = extract_activations(
+            model, variants, steering_site.module, config.ROLES,
+            config.MAX_PROBE_TOKENS_PER_BASE_ROLE,
+        )
+        log_stage_done("Stage 5/7", started)
+        train_mask = np.asarray(
+            [row["base_id"] in train_ids for row in activation_metadata]
+        )
+        validation_mask = np.asarray([
+            row["base_id"] in validation_ids for row in activation_metadata
+        ])
+        if np.any(train_mask & validation_mask) or not np.all(
+            train_mask | validation_mask
+        ):
+            raise AssertionError("Invalid base-level probe split")
+        for row, in_train in zip(activation_metadata, train_mask.tolist()):
+            row["split"] = "train" if in_train else "validation"
+
+        started = log_stage("Stage 6/7: fitting and validating the role probe")
+        artifact, diagnostics = train_probe(
+            x[train_mask], y[train_mask], x[validation_mask], y[validation_mask],
+            config.ROLES, config.REGULARIZATION_GRID,
+            config.STEERING_COEFFICIENTS, config.SEED,
+        )
+        log_stage_done("Stage 6/7", started)
+        metadata = {
+            "model_id": config.MODEL_NAME,
+            "target_layer": config.TARGET_LAYER,
+            "activation_site": steering_site.activation_site,
+            "steering_module_path": steering_site.module_path,
+            "roles": list(config.ROLES),
+            "role_order": list(config.ROLES),
+            "n_base_sequences": config.N_BASE_SEQUENCES,
+            "sequence_length": config.SEQUENCE_LENGTH,
+            "train_fraction": config.TRAIN_FRACTION,
+            "max_probe_tokens_per_base_role": config.MAX_PROBE_TOKENS_PER_BASE_ROLE,
+            "direction_formula": "w_user - mean(w_non_user)",
+            "direction_normalization": "L2 unit norm",
+            "direction_scale": "sample std (ddof=1) of held-out projections",
+            "projection_scale": float(artifact["projection_scale"]),
+            "seed": config.SEED,
+            "steering_coefficients": list(config.STEERING_COEFFICIENTS),
+            "judge_model": config.JUDGE_MODEL,
+            "sycophancy_sample_limit": config.SYCOPHANCY_SAMPLE_LIMIT,
+            "coherence_sample_limit": config.COHERENCE_SAMPLE_LIMIT,
         }
-        for base in bases
-    ])
+        save_probe(
+            config.ARTIFACTS_DIR, artifact, diagnostics, metadata, activation_metadata
+        )
+        if not diagnostics["userness_diagnostic_monotonic"]:
+            raise RuntimeError(
+                "Held-out mean Userness was not monotonic across coefficients; "
+                "diagnostics were saved, and behavioral evaluation was stopped"
+            )
+        write_jsonl(config.ARTIFACTS_DIR / "base_sequences.jsonl", [
+            {
+                "base_id": base.base_id,
+                "source": base.source,
+                "text": base.text,
+                "split": "train" if base.base_id in train_ids else "validation",
+            }
+            for base in bases
+        ])
 
     wrapper = SteeredModel(
         model, tokenizer, steering_site.module, steering_site.module_path,

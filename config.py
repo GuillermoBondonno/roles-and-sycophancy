@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
 
-MODEL_NAME = "Qwen/Qwen3-4B"
+MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 TARGET_LAYER = 18  # zero-indexed decoder layer
 ROLES = ("user", "assistant", "system")
 
@@ -28,7 +28,7 @@ N_BASE_SEQUENCES = 150
 SEQUENCE_LENGTH = 1_024
 TRAIN_FRACTION = 0.8
 REGULARIZATION_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3)
-STEERING_COEFFICIENTS = (-3.0, -2.0, -1.0, -0.5, 0.0)
+STEERING_COEFFICIENTS = (-1.0, 0.0, -0.5, -3.0, -2.0)
 MAX_NEW_TOKENS = 384
 SEED = 42
 
@@ -36,8 +36,8 @@ SEED = 42
 JUDGE_MODEL = "openrouter/openai/gpt-4.1-mini"
 JUDGE_MAX_TOKENS = 256
 JUDGE_TEMPERATURE = 0.0
-COHERENCE_SAMPLE_LIMIT = 24
-SYCOPHANCY_SAMPLE_LIMIT = 100
+COHERENCE_SAMPLE_LIMIT = 20
+SYCOPHANCY_SAMPLE_LIMIT = 75
 
 # Local scoring-phase judge resilience. This is the number of retries after the
 # initial request for transient model API failures (including HTTP 429 and 5xx).

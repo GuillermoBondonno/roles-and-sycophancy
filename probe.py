@@ -416,7 +416,13 @@ def train_probe(
                 probs[y_validation == role_index, user_index].mean()
             )
         diagnostic_rows.append(row)
-    means = [row["mean_userness"] for row in diagnostic_rows]
+    # Monotonicity is a property of Userness as a function of the coefficient, so
+    # evaluate it in ascending coefficient order regardless of how the caller
+    # ordered ``coefficients``.
+    means = [
+        row["mean_userness"]
+        for row in sorted(diagnostic_rows, key=lambda item: item["coefficient"])
+    ]
     monotonic = all(right >= left - 1e-10 for left, right in zip(means, means[1:]))
 
     per_role_accuracy = {
@@ -512,3 +518,16 @@ def save_probe(
     with (directory / "activation_metadata.jsonl").open("w", encoding="utf-8") as handle:
         for row in activation_metadata:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def load_probe(directory: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load a previously saved probe artifact and its diagnostics from disk."""
+    probe_path = directory / "probe.npz"
+    if not probe_path.exists():
+        raise FileNotFoundError(f"No saved probe found at {probe_path}")
+    with np.load(probe_path) as data:
+        artifact = {key: data[key] for key in data.files}
+    diagnostics = json.loads(
+        (directory / "probe_diagnostics.json").read_text(encoding="utf-8")
+    )
+    return artifact, diagnostics
