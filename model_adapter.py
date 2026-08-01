@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -98,6 +99,69 @@ def _candidate_layer_stacks(model: Any) -> list[tuple[str, Any]]:
             candidates.append((path, module))
             seen.add(id(module))
     return candidates
+
+
+def decoder_layer_count(model: Any) -> int:
+    """Return the number of decoder layers exposed by a supported model."""
+    inspected: list[str] = []
+    for stack_path, layers in _candidate_layer_stacks(model):
+        try:
+            layer_count = len(layers)
+        except TypeError:
+            continue
+        inspected.append(f"{stack_path} ({layer_count} layers)")
+        if layer_count and _direct_feed_forward(layers[0]) is not None:
+            return layer_count
+
+    # An explicit STEERING_MODULE_PATH can support a custom stack which the
+    # automatic module discovery does not recognize. Hugging Face configs still
+    # normally expose its depth under one of these attributes.
+    configs = [getattr(model, "config", None)]
+    if configs[0] is not None:
+        configs.append(getattr(configs[0], "text_config", None))
+    for model_config in configs:
+        if model_config is None:
+            continue
+        for name in ("num_hidden_layers", "n_layer", "num_layers"):
+            value = getattr(model_config, name, None)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+
+    detail = ", ".join(inspected) if inspected else "no decoder layer stacks"
+    raise ValueError(f"Could not determine decoder layer count; inspected {detail}")
+
+
+def resolve_layer_fractions(
+    fractions: tuple[float, ...], layer_count: int
+) -> list[tuple[float, int]]:
+    """Map configured depth fractions to unique zero-indexed layers."""
+    if layer_count <= 0:
+        raise ValueError(f"layer_count must be positive, got {layer_count}")
+    if not fractions:
+        raise ValueError("TARGET_LAYER_FRACTIONS must contain at least one fraction")
+
+    resolved: list[tuple[float, int]] = []
+    seen_layers: dict[int, float] = {}
+    for configured in fractions:
+        if isinstance(configured, bool):
+            raise ValueError(f"Layer fraction must be numeric, got {configured!r}")
+        try:
+            fraction = float(configured)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Layer fraction must be numeric, got {configured!r}") from exc
+        if not math.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+            raise ValueError(
+                f"Layer fraction must be finite and within [0, 1], got {configured!r}"
+            )
+        layer = min(int(fraction * layer_count), layer_count - 1)
+        if layer in seen_layers:
+            raise ValueError(
+                f"Layer fractions {seen_layers[layer]:g} and {fraction:g} both map "
+                f"to layer {layer} in a {layer_count}-layer model"
+            )
+        seen_layers[layer] = fraction
+        resolved.append((fraction, layer))
+    return resolved
 
 
 def resolve_steering_site(

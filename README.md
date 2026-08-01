@@ -32,8 +32,12 @@ inserting role-specific filler, which would introduce a different activation
 confound. Content token IDs and retained token ordinals are asserted equal
 across roles.
 
-The activation site is exactly the input of the selected decoder layer's
-feed-forward module. Automatic discovery recognizes common decoder layouts and
+The activation site is exactly the input of each selected decoder layer's
+feed-forward module. `TARGET_LAYER_FRACTIONS` configures a sweep by relative
+model depth. A fraction `f` maps to `min(int(f * n_layers), n_layers - 1)`, so
+`0.5` selects layer 14 in a 28-layer model and `1.0` selects layer 27. Fractions
+that collapse to the same actual layer are rejected rather than silently
+repeating work. Automatic discovery recognizes common decoder layouts and
 feed-forward names. `STEERING_MODULE_PATH` provides an explicit dotted-path
 override for other architectures. A small forward pre-hook extracts this tensor;
 the model's forward pass is not reimplemented.
@@ -72,8 +76,9 @@ During generation the feed-forward-input pre-hook changes only the final
 position in the initial prefill and the current position in each cached
 autoregressive step. It
 never changes weights or shared tensors, keeps dtype/device unchanged, and is
-removed in `finally`. The same loaded model instance is used for all
-coefficients.
+removed in `finally`. The same loaded model instance, base passages, role
+variants, and train/validation split are used for all layers and coefficients.
+Activations and probes are computed separately at every resolved layer.
 
 ## Evaluation
 
@@ -85,11 +90,12 @@ greedy cached generation, fixed prompts, fixed order, fixed seed, cache disabled
 and concurrency one.
 
 Generation and judging are separate phases. `run.py` uses the GPU only to fit
-the probe and generate both turns of every sycophancy conversation plus every
-coherence response for every coefficient. It calls Inspect with `score=False`,
-writes a portable generation manifest, and never contacts the judge. After the
-logs are downloaded, `score_results.py` applies the independent judge locally;
-it does not load or reconstruct the target model.
+the probes and generate both turns of every sycophancy conversation plus every
+coherence response for every layer/coefficient pair. It calls Inspect with
+`score=False`, writes one portable generation manifest per layer, and never
+contacts the judge. After the logs are downloaded, `score_results.py`
+recursively discovers and scores every layer with the independent judge; it
+does not load or reconstruct the target model.
 
 The existing sycophancy scorer provides answer confidence, apologize rate, and
 truthfulness. The first two aggregates are recomputed from complete per-sample
@@ -159,6 +165,15 @@ dependencies and run:
 python score_results.py results
 ```
 
+Plot any layer's resulting `summary.json` as a four-panel dashboard. The default
+output is `<layer-results>/summary_plot.png`; `.pdf` and `.svg` outputs are also
+supported.
+
+```bash
+python plot_results.py results/layer_14_fraction_0p5
+python plot_results.py results/layer_14_fraction_0p5 --output figures/experiment.svg
+```
+
 For Qwen models that expose a thinking-mode chat-template option, disable it in
 `CHAT_TEMPLATE_KWARGS` or provide a generation budget large enough for both the
 reasoning and final answer. A log of truncated `<think>` content is not a valid
@@ -168,9 +183,13 @@ behavioral observation.
 CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 ```
 
-The default is a small, openly available instruct model so the pipeline is easy
-to exercise. Set `MODEL_NAME` and choose a valid zero-indexed `TARGET_LAYER` for
-the substantive experiment. The target model must:
+Set `MODEL_NAME` and edit the layer sweep for the substantive experiment:
+
+```python
+TARGET_LAYER_FRACTIONS = (0.25, 0.5, 0.75)
+```
+
+The target model must:
 
 - load through `AutoModelForCausalLM`;
 - have a fast tokenizer with offset mappings and a native chat template;
@@ -193,23 +212,29 @@ or model-specific template options without adding architecture-specific logic.
 
 ```text
 artifacts/
-  base_sequences.jsonl
-  activation_metadata.jsonl
-  probe.npz
-  probe_metadata.json
-  probe_diagnostics.json
-  userness_steering_diagnostic.{csv,json}
+  base_sequences.jsonl                  # shared sweep inputs and split
+  layer_sweep_manifest.json
+  layer_<index>_fraction_<fraction>/
+    activation_metadata.jsonl
+    probe.npz
+    probe_metadata.json
+    probe_diagnostics.json
+    userness_steering_diagnostic.{csv,json}
 results/
-  generation_manifest.json   # portable GPU-to-local handoff
-  inspect_logs/alpha_*/       # unscored target-model generation logs
-  scored_logs/alpha_*/        # locally judged Inspect logs
-  per_sample/*.jsonl          # prompts, outputs, judge scores/metadata
-  summary.csv
-  summary.json
-  random_direction_control/   # only when enabled
+  layer_sweep_manifest.json
+  layer_<index>_fraction_<fraction>/
+    generation_manifest.json             # portable GPU-to-local handoff
+    inspect_logs/alpha_*/                 # unscored generation logs
+    scored_logs/alpha_*/                  # locally judged Inspect logs
+    per_sample/*.jsonl                    # outputs and judge metadata
+    summary.{csv,json}
+    random_direction_control/             # only when enabled
+  layer_sweep_summary.{csv,json}          # produced by score_results.py
 ```
 
-The summary is indexed by coefficient and contains
+Each layer summary is indexed by coefficient and also records `target_layer`
+and `target_layer_fraction`. The sweep summary combines all layer summaries and
+contains
 `sycophancy_answer_confidence`, `sycophancy_apologize_rate`,
 `sycophancy_truthfulness`, `coherence_mean`, `coherence_std`,
 `coherence_failure_rate`, and `mean_output_tokens`.
@@ -226,8 +251,9 @@ refusal, truncation, verbosity changes, or broad model damage.
 The detailed paper appendix specifies 250 base sequences, while an earlier
 overview footnote reports 1,250; this repository follows the appendix and the
 experiment specification here. It uses C4 only (the paper uses C4 and Dolma3),
-one chosen layer rather than all layers, and deterministic balanced token
-subsampling. The paper also requires zero-shot conversational validity for a
+configured layer fractions rather than necessarily every layer, and
+deterministic balanced token subsampling. The paper also requires zero-shot
+conversational validity for a
 probe used as a diagnostic instrument; this steering study reports its own
 held-out synthetic validity and behavioral/coherence controls, but does not
 claim to reproduce every paper validity experiment.

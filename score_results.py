@@ -202,7 +202,7 @@ def score_log_incrementally(
     return working
 
 
-def write_summary(rows: list[dict[str, float]], directory: Path) -> None:
+def write_summary(rows: list[dict[str, Any]], directory: Path) -> None:
     rows.sort(key=lambda row: row["coefficient"])
     (directory / "summary.json").write_text(
         json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -235,7 +235,7 @@ def summarize_experiment(experiment_root: Path) -> None:
         coefficient = float(metadata["steering_coefficient"])
         grouped.setdefault(coefficient, {})[evaluation] = log
 
-    rows: list[dict[str, float]] = []
+    rows: list[dict[str, Any]] = []
     for coefficient, logs in grouped.items():
         if set(logs) != {"sycophancy", "coherence"}:
             logger.warning(
@@ -243,14 +243,63 @@ def summarize_experiment(experiment_root: Path) -> None:
                 coefficient, sorted(logs),
             )
             continue
-        rows.append(
-            {
-                "coefficient": coefficient,
-                **sycophancy_summary(logs["sycophancy"]),
-                **coherence_summary(logs["coherence"]),
-            }
-        )
+        sycophancy_metadata = logs["sycophancy"].eval.metadata or {}
+        coherence_metadata = logs["coherence"].eval.metadata or {}
+        for key in ("target_layer", "target_layer_fraction"):
+            if sycophancy_metadata.get(key) != coherence_metadata.get(key):
+                raise ValueError(
+                    f"alpha={coefficient:g} has inconsistent {key} metadata "
+                    "between sycophancy and coherence logs"
+                )
+        row: dict[str, Any] = {
+            "coefficient": coefficient,
+            **sycophancy_summary(logs["sycophancy"]),
+            **coherence_summary(logs["coherence"]),
+        }
+        if "target_layer" in sycophancy_metadata:
+            row["target_layer"] = int(sycophancy_metadata["target_layer"])
+        if "target_layer_fraction" in sycophancy_metadata:
+            row["target_layer_fraction"] = float(
+                sycophancy_metadata["target_layer_fraction"]
+            )
+        rows.append(row)
     write_summary(rows, experiment_root)
+
+
+def write_layer_sweep_summary(
+    result_root: Path, experiment_roots: set[Path]
+) -> None:
+    """Combine per-layer summaries into a sweep-level portable table."""
+    rows: list[dict[str, Any]] = []
+    for experiment_root in sorted(experiment_roots):
+        summary_path = experiment_root / "summary.json"
+        if not summary_path.is_file():
+            continue
+        try:
+            experiment = str(experiment_root.relative_to(result_root))
+        except ValueError:
+            experiment = str(experiment_root)
+        for row in json.loads(summary_path.read_text(encoding="utf-8")):
+            rows.append({"experiment": experiment, **row})
+    if not rows:
+        return
+    rows.sort(key=lambda row: (
+        int(row.get("target_layer", -1)),
+        float(row["coefficient"]),
+        str(row["experiment"]),
+    ))
+    (result_root / "layer_sweep_summary.json").write_text(
+        json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    fieldnames = list(rows[0])
+    for row in rows[1:]:
+        fieldnames.extend(key for key in row if key not in fieldnames)
+    with (result_root / "layer_sweep_summary.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def score_results(result_root: Path) -> None:
@@ -261,6 +310,7 @@ def score_results(result_root: Path) -> None:
     if not sources:
         raise FileNotFoundError(f"No generation logs found below {result_root}")
     judge = build_judge_model()
+    logger.info("Discovered %d generation logs across the layer sweep", len(sources))
     experiment_roots: set[Path] = set()
     for experiment_root, source in sources:
         experiment_roots.add(experiment_root)
@@ -276,7 +326,14 @@ def score_results(result_root: Path) -> None:
         generated = read_eval_log(source)
         evaluation = evaluation_name(generated)
         coefficient = float((generated.eval.metadata or {})["steering_coefficient"])
-        logger.info("Scoring %s at alpha=%g", evaluation, coefficient)
+        metadata = generated.eval.metadata or {}
+        logger.info(
+            "Scoring %s at layer=%s (fraction=%s), alpha=%g",
+            evaluation,
+            metadata.get("target_layer", "legacy"),
+            metadata.get("target_layer_fraction", "legacy"),
+            coefficient,
+        )
         scored = score_log_incrementally(
             generated, existing, evaluation, judge, output
         )
@@ -290,6 +347,7 @@ def score_results(result_root: Path) -> None:
 
     for experiment_root in experiment_roots:
         summarize_experiment(experiment_root)
+    write_layer_sweep_summary(result_root, experiment_roots)
 
 
 def main() -> None:

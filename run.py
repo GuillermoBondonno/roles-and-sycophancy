@@ -1,4 +1,4 @@
-"""Train once, steer one loaded model, and save unscored Inspect generations."""
+"""Train and steer one loaded model across a configured decoder-layer sweep."""
 
 from __future__ import annotations
 
@@ -13,7 +13,11 @@ from tqdm.auto import tqdm
 
 import config
 from evals import coherence_task
-from model_adapter import resolve_steering_site
+from model_adapter import (
+    decoder_layer_count,
+    resolve_layer_fractions,
+    resolve_steering_site,
+)
 from probe import (
     build_role_variants,
     extract_activations,
@@ -99,6 +103,14 @@ def coefficient_slug(coefficient: float) -> str:
     return f"{sign}{abs(coefficient):g}".replace(".", "p")
 
 
+def fraction_slug(fraction: float) -> str:
+    return f"{fraction:g}".replace(".", "p")
+
+
+def layer_directory_name(fraction: float, layer: int) -> str:
+    return f"layer_{layer}_fraction_{fraction_slug(fraction)}"
+
+
 def require_generated_eval(logs: list[Any], expected_samples: int, name: str) -> Any:
     """Accept a generation-only log if it contains at least one usable response."""
     if len(logs) != 1:
@@ -133,6 +145,7 @@ def run_generations(
     result_root: Path,
     sycophancy_limit: int,
     coherence_limit: int,
+    target_layer_fraction: float,
 ) -> list[dict[str, Any]]:
     """Generate and persist all target-model responses without judge calls."""
     from inspect_ai import eval as inspect_eval
@@ -165,7 +178,8 @@ def run_generations(
             "continue_on_fail": True,
             "metadata": {
                 "steering_coefficient": coefficient,
-                "target_layer": config.TARGET_LAYER,
+                "target_layer": wrapper.target_layer,
+                "target_layer_fraction": target_layer_fraction,
                 "activation_site": wrapper.activation_site,
             },
         }
@@ -219,6 +233,8 @@ def run_generations(
                     "evaluation": evaluation,
                     "log": portable_location,
                     "samples": len(log.samples or []),
+                    "target_layer": wrapper.target_layer,
+                    "target_layer_fraction": target_layer_fraction,
                 }
             )
         result_root.mkdir(parents=True, exist_ok=True)
@@ -229,49 +245,53 @@ def run_generations(
     return manifest
 
 
-def main() -> None:
+def write_sweep_manifest(rows: list[dict[str, Any]]) -> None:
+    """Checkpoint the layer mapping and per-layer generation status."""
+    payload = json.dumps(rows, indent=2, sort_keys=True) + "\n"
+    for root in (config.ARTIFACTS_DIR, config.RESULTS_DIR):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "layer_sweep_manifest.json").write_text(payload, encoding="utf-8")
+
+
+def run_layer_experiment(
+    model: Any,
+    tokenizer: Any,
+    variants: list[Any],
+    train_ids: set[str],
+    validation_ids: set[str],
+    target_layer_fraction: float,
+    target_layer: int,
+    layer_count: int,
+) -> str:
+    """Fit, validate, and behaviorally evaluate one resolved sweep layer."""
     import torch
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%H:%M:%S",
+    directory_name = layer_directory_name(target_layer_fraction, target_layer)
+    artifact_directory = config.ARTIFACTS_DIR / directory_name
+    result_directory = config.RESULTS_DIR / directory_name
+    logger.info(
+        "Layer fraction %g resolved to decoder layer %d/%d",
+        target_layer_fraction,
+        target_layer,
+        layer_count - 1,
     )
-
-    seed_everything(config.SEED)
-    if config.JUDGE_MODEL == config.MODEL_NAME:
-        raise ValueError("JUDGE_MODEL must be independent of the steered target model")
-    config.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    started = log_stage("Stage 1/7: loading tokenizer and model")
-    model, tokenizer = load_model_once()
-    log_stage_done("Stage 1/7", started)
-    started = log_stage("Stage 2/7: resolving the steering module")
     steering_site = resolve_steering_site(
-        model, config.TARGET_LAYER, config.STEERING_MODULE_PATH
+        model, target_layer, config.STEERING_MODULE_PATH
     )
     logger.info("Using steering site: %s", steering_site.activation_site)
-    log_stage_done("Stage 2/7", started)
 
-    started = log_stage("Stage 3/7: selecting neutral C4 base passages")
-    bases = load_neutral_base_sequences(
-        tokenizer, config.N_BASE_SEQUENCES, config.SEQUENCE_LENGTH, config.SEED
-    )
-    log_stage_done("Stage 3/7", started)
-    # This split intentionally occurs before any role copy is constructed.
-    train_ids, validation_ids = split_base_ids(bases, config.TRAIN_FRACTION, config.SEED)
-    started = log_stage("Stage 4/7: rendering role variants")
-    variants = build_role_variants(
-        tokenizer, bases, config.ROLES, config.CHAT_TEMPLATE_KWARGS
-    )
-    log_stage_done("Stage 4/7", started)
-    started = log_stage("Stage 5/7: extracting model activations")
+    started = log_stage(f"Layer {target_layer}: extracting model activations")
     x, y, activation_metadata = extract_activations(
-        model, variants, steering_site.module, config.ROLES,
+        model,
+        variants,
+        steering_site.module,
+        config.ROLES,
         config.MAX_PROBE_TOKENS_PER_BASE_ROLE,
     )
-    log_stage_done("Stage 5/7", started)
-    train_mask = np.asarray([row["base_id"] in train_ids for row in activation_metadata])
+    log_stage_done(f"Layer {target_layer}: activation extraction", started)
+    train_mask = np.asarray([
+        row["base_id"] in train_ids for row in activation_metadata
+    ])
     validation_mask = np.asarray([
         row["base_id"] in validation_ids for row in activation_metadata
     ])
@@ -280,16 +300,23 @@ def main() -> None:
     for row, in_train in zip(activation_metadata, train_mask.tolist()):
         row["split"] = "train" if in_train else "validation"
 
-    started = log_stage("Stage 6/7: fitting and validating the role probe")
+    started = log_stage(f"Layer {target_layer}: fitting and validating role probe")
     artifact, diagnostics = train_probe(
-        x[train_mask], y[train_mask], x[validation_mask], y[validation_mask],
-        config.ROLES, config.REGULARIZATION_GRID,
-        config.STEERING_COEFFICIENTS, config.SEED,
+        x[train_mask],
+        y[train_mask],
+        x[validation_mask],
+        y[validation_mask],
+        config.ROLES,
+        config.REGULARIZATION_GRID,
+        config.STEERING_COEFFICIENTS,
+        config.SEED,
     )
-    log_stage_done("Stage 6/7", started)
+    log_stage_done(f"Layer {target_layer}: probe fit", started)
     metadata = {
         "model_id": config.MODEL_NAME,
-        "target_layer": config.TARGET_LAYER,
+        "target_layer": target_layer,
+        "target_layer_fraction": target_layer_fraction,
+        "decoder_layer_count": layer_count,
         "activation_site": steering_site.activation_site,
         "steering_module_path": steering_site.module_path,
         "roles": list(config.ROLES),
@@ -309,13 +336,120 @@ def main() -> None:
         "coherence_sample_limit": config.COHERENCE_SAMPLE_LIMIT,
     }
     save_probe(
-        config.ARTIFACTS_DIR, artifact, diagnostics, metadata, activation_metadata
+        artifact_directory, artifact, diagnostics, metadata, activation_metadata
     )
+    # The activation matrix can be large and is not needed during behavioral
+    # generation. Release it before moving on to generation or the next layer.
+    del x, y, train_mask, validation_mask
     if not diagnostics["userness_diagnostic_monotonic"]:
-        raise RuntimeError(
-            "Held-out mean Userness was not monotonic across coefficients; "
-            "diagnostics were saved, and behavioral evaluation was stopped"
+        logger.warning(
+            "Layer %d held-out mean Userness is not monotonic; diagnostics were "
+            "saved to %s and behavioral generation for this layer is skipped",
+            target_layer,
+            artifact_directory,
         )
+        return "diagnostics_only_non_monotonic"
+
+    wrapper = SteeredModel(
+        model,
+        tokenizer,
+        steering_site.module,
+        steering_site.module_path,
+        target_layer,
+        artifact["direction_unit"],
+        float(artifact["projection_scale"]),
+    )
+    check = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "A short deterministic check."}],
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True,
+        **config.CHAT_TEMPLATE_KWARGS,
+    )
+    device = next(model.parameters()).device
+    if "attention_mask" not in check:
+        check["attention_mask"] = torch.ones_like(check["input_ids"])
+    assert_zero_equivalence(
+        wrapper, check["input_ids"].to(device), check["attention_mask"].to(device)
+    )
+    inspect_model = make_inspect_model(
+        wrapper,
+        config.MODEL_NAME,
+        config.MAX_NEW_TOKENS,
+        config.TEMPERATURE,
+        config.TOP_P,
+        config.SEED,
+        config.CHAT_TEMPLATE_KWARGS,
+        api_name=f"local-steered-layer-{target_layer}",
+    )
+    started = log_stage(f"Layer {target_layer}: generating behavioral responses")
+    run_generations(
+        wrapper,
+        inspect_model,
+        config.STEERING_COEFFICIENTS,
+        result_directory,
+        config.SYCOPHANCY_SAMPLE_LIMIT,
+        config.COHERENCE_SAMPLE_LIMIT,
+        target_layer_fraction,
+    )
+    log_stage_done(f"Layer {target_layer}: behavioral generation", started)
+
+    if config.RUN_RANDOM_DIRECTION_CONTROL:
+        primary = wrapper.unit_direction.clone()
+        try:
+            wrapper.unit_direction = equal_norm_random_direction(primary, config.SEED)
+            run_generations(
+                wrapper,
+                inspect_model,
+                config.STEERING_COEFFICIENTS,
+                result_directory / "random_direction_control",
+                min(config.SYCOPHANCY_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
+                min(config.COHERENCE_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
+                target_layer_fraction,
+            )
+        finally:
+            wrapper.unit_direction = primary
+    return "generated"
+
+
+def main() -> None:
+    import torch
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    seed_everything(config.SEED)
+    if config.JUDGE_MODEL == config.MODEL_NAME:
+        raise ValueError("JUDGE_MODEL must be independent of the steered target model")
+    config.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    started = log_stage("Loading tokenizer and model")
+    model, tokenizer = load_model_once()
+    log_stage_done("Model load", started)
+    layer_count = decoder_layer_count(model)
+    layers = resolve_layer_fractions(config.TARGET_LAYER_FRACTIONS, layer_count)
+    logger.info(
+        "Resolved layer sweep: %s",
+        ", ".join(f"{fraction:g} -> {layer}" for fraction, layer in layers),
+    )
+
+    started = log_stage("Selecting neutral C4 base passages")
+    bases = load_neutral_base_sequences(
+        tokenizer, config.N_BASE_SEQUENCES, config.SEQUENCE_LENGTH, config.SEED
+    )
+    log_stage_done("Base-passage selection", started)
+    # This split intentionally occurs before any role copy is constructed and
+    # is shared by every layer in the sweep.
+    train_ids, validation_ids = split_base_ids(bases, config.TRAIN_FRACTION, config.SEED)
+    started = log_stage("Rendering role variants")
+    variants = build_role_variants(
+        tokenizer, bases, config.ROLES, config.CHAT_TEMPLATE_KWARGS
+    )
+    log_stage_done("Role-variant rendering", started)
     write_jsonl(config.ARTIFACTS_DIR / "base_sequences.jsonl", [
         {
             "base_id": base.base_id,
@@ -326,52 +460,50 @@ def main() -> None:
         for base in bases
     ])
 
-    wrapper = SteeredModel(
-        model, tokenizer, steering_site.module, steering_site.module_path,
-        config.TARGET_LAYER,
-        artifact["direction_unit"], float(artifact["projection_scale"]),
-    )
-    check = tokenizer.apply_chat_template(
-        [{"role": "user", "content": "A short deterministic check."}],
-        tokenize=True, add_generation_prompt=True, return_tensors="pt",
-        return_dict=True, **config.CHAT_TEMPLATE_KWARGS,
-    )
-    device = next(model.parameters()).device
-    if "attention_mask" not in check:
-        check["attention_mask"] = torch.ones_like(check["input_ids"])
-    assert_zero_equivalence(
-        wrapper, check["input_ids"].to(device), check["attention_mask"].to(device)
-    )
-    inspect_model = make_inspect_model(
-        wrapper, config.MODEL_NAME, config.MAX_NEW_TOKENS,
-        config.TEMPERATURE, config.TOP_P, config.SEED,
-        config.CHAT_TEMPLATE_KWARGS,
-    )
-    started = log_stage("Stage 7/7: generating behavioral-evaluation responses")
-    run_generations(
-        wrapper, inspect_model, config.STEERING_COEFFICIENTS,
-        config.RESULTS_DIR, config.SYCOPHANCY_SAMPLE_LIMIT,
-        config.COHERENCE_SAMPLE_LIMIT,
-    )
-    log_stage_done("Stage 7/7", started)
-
-    if config.RUN_RANDOM_DIRECTION_CONTROL:
-        primary = wrapper.unit_direction.clone()
+    sweep_rows: list[dict[str, Any]] = [
+        {
+            "target_layer_fraction": fraction,
+            "target_layer": layer,
+            "decoder_layer_count": layer_count,
+            "artifacts": layer_directory_name(fraction, layer),
+            "results": layer_directory_name(fraction, layer),
+            "status": "pending",
+        }
+        for fraction, layer in layers
+    ]
+    write_sweep_manifest(sweep_rows)
+    for index, ((fraction, layer), row) in enumerate(zip(layers, sweep_rows), start=1):
+        logger.info(
+            "Starting layer sweep entry %d/%d (fraction=%g, layer=%d)",
+            index,
+            len(layers),
+            fraction,
+            layer,
+        )
+        row["status"] = "running"
+        write_sweep_manifest(sweep_rows)
         try:
-            wrapper.unit_direction = equal_norm_random_direction(primary, config.SEED)
-            run_generations(
-                wrapper, inspect_model, config.STEERING_COEFFICIENTS,
-                config.RESULTS_DIR / "random_direction_control",
-                min(config.SYCOPHANCY_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
-                min(config.COHERENCE_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
+            row["status"] = run_layer_experiment(
+                model,
+                tokenizer,
+                variants,
+                train_ids,
+                validation_ids,
+                fraction,
+                layer,
+                layer_count,
             )
-        finally:
-            wrapper.unit_direction = primary
+        except Exception as exc:
+            row["status"] = "failed"
+            row["error"] = str(exc)
+            write_sweep_manifest(sweep_rows)
+            raise
+        write_sweep_manifest(sweep_rows)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
     logger.info(
-        "GPU generation complete. Download %s and run `python score_results.py` locally",
+        "GPU layer sweep complete. Download %s and run `python score_results.py` locally",
         config.RESULTS_DIR,
     )
 

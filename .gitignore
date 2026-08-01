@@ -9,3 +9,4 @@ artifacts/*
 !artifacts/.gitkeep
 results/*
 !results/.gitkeep
+results*/

@@ -7,9 +7,11 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
-
-MODEL_NAME = "Qwen/Qwen3-4B"
-TARGET_LAYER = 18  # zero-indexed decoder layer
+MODEL_NAME = "Qwen/Qwen3-8B"
+# Fractions are converted to zero-indexed decoder layers with
+# ``min(int(fraction * n_layers), n_layers - 1)``. Thus 0.5 selects layer 14
+# in a 28-layer model, while 1.0 selects its final layer (27).
+TARGET_LAYER_FRACTIONS = (0.25, 0.5, 0.75)
 ROLES = ("user", "assistant", "system")
 
 # The usual decoder layouts are discovered automatically. For an unusual or
@@ -28,7 +30,7 @@ N_BASE_SEQUENCES = 150
 SEQUENCE_LENGTH = 1_024
 TRAIN_FRACTION = 0.8
 REGULARIZATION_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3)
-STEERING_COEFFICIENTS = (-3.0, -2.0, -1.0, -0.5, 0.0)
+STEERING_COEFFICIENTS = (-7.0, -5.0, -3.0, -1.5, 0.0)
 MAX_NEW_TOKENS = 384
 SEED = 42
 

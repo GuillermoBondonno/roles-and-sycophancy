@@ -114,6 +114,7 @@ def make_inspect_model(
     top_p: float,
     seed: int,
     chat_template_kwargs: dict[str, Any] | None = None,
+    api_name: str = "local-steered",
 ) -> Any:
     """Expose the existing local model instance directly to current Inspect AI."""
     from inspect_ai.model import (
@@ -127,7 +128,7 @@ def make_inspect_model(
     )
     from inspect_ai.tool import ToolChoice, ToolInfo
 
-    @modelapi("local-steered")
+    @modelapi(api_name)
     class LocalSteeredAPI(ModelAPI):
         def __init__(self) -> None:
             super().__init__(

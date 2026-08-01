@@ -3,6 +3,7 @@ transformers>=5.14.1,<6
 huggingface-hub>=1.5,<2
 datasets>=4.8.5
 numpy>=1.26
+matplotlib>=3.8,<4
 scikit-learn>=1.5
 inspect-ai>=0.3.249,<0.4
 inspect-evals>=0.16.0,<0.17
