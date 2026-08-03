@@ -158,6 +158,25 @@ GPU machine:
 python run.py
 ```
 
+If a run is interrupted after a layer's probe artifacts were saved, resume only
+that layer's response generation with its fraction. This loads `probe.npz`,
+skips activation extraction and probe fitting, reuses complete task logs, and
+uses Inspect's retry support to preserve completed samples from an interrupted
+task log:
+
+```bash
+python run.py --resume-generation 0.75
+```
+
+Use explicit roots when the downloaded checkpoint directories have different
+names, as in the August 2 copy in this checkout:
+
+```bash
+python run.py --resume-generation 0.75 \
+  --artifacts-dir artifacts_aug_2_v2 \
+  --results-dir results_aug_2_v2
+```
+
 Download the resulting `results/` directory to a local checkout with the same
 dependencies and run:
 

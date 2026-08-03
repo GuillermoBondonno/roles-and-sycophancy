@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from inspect_ai.model import get_model
 from inspect_ai.model._model import ModelName
 
 from steered_model import make_inspect_model
@@ -20,3 +21,7 @@ def test_local_steered_api_has_inspect_registry_info() -> None:
     )
 
     assert str(ModelName(model)) == "local-steered/example/model"
+
+    reconstructed = get_model(str(ModelName(model)), memoize=False)
+
+    assert str(ModelName(reconstructed)) == "local-steered/example/model"

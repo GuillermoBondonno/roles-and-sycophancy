@@ -128,20 +128,34 @@ def make_inspect_model(
     )
     from inspect_ai.tool import ToolChoice, ToolInfo
 
+    default_config = GenerateConfig(
+        max_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        seed=seed,
+        max_connections=1,
+        adaptive_connections=False,
+        cache=False,
+    )
+
     @modelapi(api_name)
     class LocalSteeredAPI(ModelAPI):
-        def __init__(self) -> None:
+        def __init__(
+            self,
+            model_name: str = model_name,
+            base_url: str | None = None,
+            api_key: str | None = None,
+            config: GenerateConfig = default_config,
+            **_model_args: Any,
+        ) -> None:
+            # Inspect's eval-retry reconstructs the model provider from the
+            # interrupted log. Accept its standard provider arguments while
+            # continuing to close over the already loaded wrapper.
             super().__init__(
                 model_name=model_name,
-                config=GenerateConfig(
-                    max_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    seed=seed,
-                    max_connections=1,
-                    adaptive_connections=False,
-                    cache=False,
-                ),
+                base_url=base_url,
+                api_key=api_key,
+                config=config,
             )
 
         async def count_text_tokens(self, text: str) -> int:
@@ -201,13 +215,4 @@ def make_inspect_model(
             }
             return output
 
-    config = GenerateConfig(
-        max_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        seed=seed,
-        max_connections=1,
-        adaptive_connections=False,
-        cache=False,
-    )
-    return Model(LocalSteeredAPI(), config)
+    return Model(LocalSteeredAPI(), default_config)
