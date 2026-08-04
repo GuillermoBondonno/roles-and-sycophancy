@@ -30,17 +30,34 @@ COLORS = {
 }
 
 
-def load_summary(location: Path) -> list[dict[str, float]]:
+def _summary_path(location: Path) -> Path:
+    """Resolve either a single-experiment or layer-sweep summary."""
+    if not location.is_dir():
+        return location
+    summary_path = location / "summary.json"
+    if summary_path.is_file():
+        return summary_path
+    return location / "layer_sweep_summary.json"
+
+
+def load_summary(location: Path) -> list[dict[str, Any]]:
     """Load and validate a ``summary.json`` file or results directory."""
-    summary_path = location / "summary.json" if location.is_dir() else location
+    summary_path = _summary_path(location)
     if not summary_path.is_file():
-        raise FileNotFoundError(f"Summary file not found: {summary_path}")
+        if location.is_dir():
+            message = (
+                f"Summary file not found: expected {location / 'summary.json'} or "
+                f"{location / 'layer_sweep_summary.json'}"
+            )
+        else:
+            message = f"Summary file not found: {summary_path}"
+        raise FileNotFoundError(message)
 
     raw = json.loads(summary_path.read_text(encoding="utf-8"))
     if not isinstance(raw, list) or not raw:
         raise ValueError(f"Expected a non-empty list in {summary_path}")
 
-    rows: list[dict[str, float]] = []
+    rows: list[dict[str, Any]] = []
     for index, raw_row in enumerate(raw, start=1):
         if not isinstance(raw_row, dict):
             raise ValueError(f"Summary row {index} is not an object")
@@ -49,7 +66,7 @@ def load_summary(location: Path) -> list[dict[str, float]]:
             raise ValueError(
                 f"Summary row {index} is missing metrics: {', '.join(missing)}"
             )
-        row: dict[str, float] = {}
+        row: dict[str, Any] = {}
         for metric in REQUIRED_METRICS:
             value = raw_row[metric]
             if isinstance(value, bool):
@@ -65,13 +82,74 @@ def load_summary(location: Path) -> list[dict[str, float]]:
                     f"Summary row {index} has non-finite {metric}: {value!r}"
                 )
             row[metric] = number
+        for metric in ("target_layer", "target_layer_fraction"):
+            if metric not in raw_row:
+                continue
+            value = raw_row[metric]
+            if isinstance(value, bool):
+                raise ValueError(f"Summary row {index} has non-numeric {metric}")
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Summary row {index} has non-numeric {metric}: {value!r}"
+                ) from exc
+            if not math.isfinite(number):
+                raise ValueError(
+                    f"Summary row {index} has non-finite {metric}: {value!r}"
+                )
+            if metric == "target_layer" and not number.is_integer():
+                raise ValueError(
+                    f"Summary row {index} has non-integer {metric}: {value!r}"
+                )
+            row[metric] = int(number) if metric == "target_layer" else number
+        if "experiment" in raw_row:
+            if not isinstance(raw_row["experiment"], str):
+                raise ValueError(f"Summary row {index} has non-string experiment")
+            row["experiment"] = raw_row["experiment"]
         rows.append(row)
 
-    rows.sort(key=lambda row: row["coefficient"])
-    coefficients = [row["coefficient"] for row in rows]
-    if len(set(coefficients)) != len(coefficients):
-        raise ValueError("Summary contains duplicate steering coefficients")
+    rows.sort(key=lambda row: (*_layer_key(row), row["coefficient"]))
+    identities = [(*_layer_key(row), row["coefficient"]) for row in rows]
+    if len(set(identities)) != len(identities):
+        raise ValueError(
+            "Summary contains duplicate steering coefficients within a layer"
+        )
     return rows
+
+
+def _layer_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Return a stable grouping key for one entry in a layer sweep."""
+    if "target_layer" in row:
+        return (
+            0,
+            row["target_layer"],
+            row.get("target_layer_fraction", -1.0),
+            row.get("experiment", ""),
+        )
+    if "experiment" in row:
+        return (1, row["experiment"])
+    return (2,)
+
+
+def _layer_groups(
+    rows: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(_layer_key(row), []).append(row)
+
+    labelled: list[tuple[str, list[dict[str, Any]]]] = []
+    for group_rows in groups.values():
+        first = group_rows[0]
+        if "target_layer" in first:
+            label = f"Layer {first['target_layer']:g}"
+            if "target_layer_fraction" in first:
+                label += f" ({first['target_layer_fraction']:.0%})"
+        else:
+            label = str(first.get("experiment", "Experiment")).replace("_", " ")
+        labelled.append((label, group_rows))
+    return labelled
 
 
 def _style_axis(axis: Any) -> None:
@@ -99,10 +177,16 @@ def _mark_baseline(axis: Any, x: float, y: float) -> None:
     )
 
 
-def create_dashboard(
-    rows: list[dict[str, float]], title: str
-) -> Any:
-    """Create and return the experiment dashboard figure."""
+def create_dashboard(rows: list[dict[str, Any]], title: str) -> Any:
+    """Create a dashboard for one target layer."""
+    groups = _layer_groups(rows)
+    if len(groups) > 1:
+        raise ValueError("create_dashboard expects rows from exactly one layer")
+    return _create_single_dashboard(rows, title)
+
+
+def _create_single_dashboard(rows: list[dict[str, Any]], title: str) -> Any:
+    """Create and return a dashboard for one target layer."""
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator, MultipleLocator, PercentFormatter
 
@@ -308,22 +392,64 @@ def default_title(location: Path) -> str:
     return root.name.replace("_", " ").strip().title() or "Experiment Summary"
 
 
+def _experiment_path(label: str, rows: list[dict[str, Any]]) -> Path:
+    """Return a safe relative output path for a layer group."""
+    experiment = rows[0].get("experiment")
+    if experiment:
+        candidate = Path(str(experiment))
+        if not candidate.is_absolute() and ".." not in candidate.parts:
+            return candidate
+    slug = "".join(
+        character.lower() if character.isalnum() else "_" for character in label
+    )
+    return Path("_".join(part for part in slug.split("_") if part))
+
+
+def _output_path(
+    result_directory: Path,
+    requested_output: Path | None,
+    label: str,
+    rows: list[dict[str, Any]],
+    is_sweep: bool,
+) -> Path:
+    """Choose an output path for a single layer within a results input."""
+    if not is_sweep:
+        return requested_output or result_directory / "summary_plot.png"
+
+    experiment = _experiment_path(label, rows)
+    if requested_output is None:
+        return result_directory / experiment / "summary_plot.png"
+    experiment_suffix = "_".join(experiment.parts)
+    return requested_output.with_name(
+        f"{requested_output.stem}_{experiment_suffix}{requested_output.suffix}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Plot a scored experiment's summary.json as a dashboard."
+        description=(
+            "Plot a scored experiment summary or combined layer sweep as a "
+            "dashboard."
+        )
     )
     parser.add_argument(
         "results",
         nargs="?",
         type=Path,
         default=Path("results"),
-        help="Results directory or path to summary.json (default: results)",
+        help=(
+            "Results directory or path to summary.json/layer_sweep_summary.json "
+            "(default: results)"
+        ),
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="Output image path (default: <results>/summary_plot.png)",
+        help=(
+            "Output image path. For a sweep, the experiment name is appended "
+            "to this filename (default: each layer directory/summary_plot.png)"
+        ),
     )
     parser.add_argument("--title", help="Custom figure title")
     parser.add_argument(
@@ -333,16 +459,30 @@ def main() -> None:
 
     rows = load_summary(args.results)
     result_directory = args.results if args.results.is_dir() else args.results.parent
-    output = args.output or result_directory / "summary_plot.png"
-    if output.suffix.lower() not in {".png", ".pdf", ".svg"}:
+    if args.output and args.output.suffix.lower() not in {".png", ".pdf", ".svg"}:
         parser.error("--output must end in .png, .pdf, or .svg")
     if args.dpi <= 0:
         parser.error("--dpi must be positive")
 
-    figure = create_dashboard(rows, args.title or default_title(args.results))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output, dpi=args.dpi, bbox_inches="tight")
-    print(f"Saved plot to {output}")
+    is_sweep = _summary_path(args.results).name == "layer_sweep_summary.json"
+    groups = _layer_groups(rows)
+    base_title = args.title or default_title(args.results)
+    import matplotlib.pyplot as plt
+
+    for label, group_rows in groups:
+        output = _output_path(
+            result_directory,
+            args.output,
+            label,
+            group_rows,
+            is_sweep,
+        )
+        title = f"{base_title} — {label}" if is_sweep else base_title
+        figure = create_dashboard(group_rows, title)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output, dpi=args.dpi, bbox_inches="tight")
+        print(f"Saved plot to {output}")
+        plt.close(figure)
 
 
 if __name__ == "__main__":

@@ -211,6 +211,7 @@ def save_per_sample(log: Any, path: Path, coefficient: float, evaluation: str) -
             row = {
                 "coefficient": coefficient,
                 "evaluation": evaluation,
+                "steering_scope": (log.eval.metadata or {}).get("steering_scope"),
                 "sample_id": sample.id,
                 "input": [message.model_dump(mode="json") for message in sample.input]
                 if isinstance(sample.input, list) else sample.input,

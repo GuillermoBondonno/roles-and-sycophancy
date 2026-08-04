@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
+import hashlib
 import json
 import logging
 import math
@@ -30,6 +32,8 @@ from probe import (
     train_probe,
 )
 from steered_model import (
+    STEERING_SCOPE_ALWAYS,
+    STEERING_SCOPE_SECOND_ASSISTANT,
     SteeredModel,
     assert_zero_equivalence,
     equal_norm_random_direction,
@@ -40,6 +44,7 @@ from utils import send_ntfy_message
 
 logger = logging.getLogger(__name__)
 NTFY_TOPIC = "roles_and_sycophancy_experiment_rbi24u"
+SAMPLE_CONTRACT_FILENAME = "evaluation_sample_contract.json"
 
 
 def notify(message: str) -> None:
@@ -117,6 +122,29 @@ def coefficient_slug(coefficient: float) -> str:
     return f"{sign}{abs(coefficient):g}".replace(".", "p")
 
 
+def validate_steering_coefficients(values: tuple[float, ...]) -> tuple[float, ...]:
+    """Return finite, unique coefficients with collision-free path slugs."""
+    coefficients = tuple(float(value) for value in values)
+    if not coefficients:
+        raise ValueError("At least one steering coefficient is required")
+    if not all(math.isfinite(value) for value in coefficients):
+        raise ValueError("Steering coefficients must all be finite")
+
+    by_slug: dict[str, float] = {}
+    for coefficient in coefficients:
+        slug = coefficient_slug(coefficient)
+        previous = by_slug.get(slug)
+        if previous is not None:
+            if math.isclose(previous, coefficient, rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError(f"Duplicate steering coefficient: {coefficient:g}")
+            raise ValueError(
+                f"Steering coefficients {previous!r} and {coefficient!r} both "
+                f"map to alpha_{slug}"
+            )
+        by_slug[slug] = coefficient
+    return coefficients
+
+
 def fraction_slug(fraction: float) -> str:
     return f"{fraction:g}".replace(".", "p")
 
@@ -180,6 +208,7 @@ def existing_generation_logs(
     log_dir: Path,
     evaluation: str,
     coefficient: float,
+    steering_scope: str | None = None,
 ) -> list[Any]:
     """Read matching completed or interrupted logs from one alpha directory."""
     from inspect_ai.log import read_eval_log
@@ -200,12 +229,147 @@ def existing_generation_logs(
             logged_coefficient = float(metadata["steering_coefficient"])
         except (KeyError, TypeError, ValueError):
             continue
-        if (
+        matches_identity = (
             generation_evaluation_name(log) == evaluation
             and math.isclose(logged_coefficient, coefficient, rel_tol=0.0, abs_tol=1e-12)
-        ):
-            logs.append(log)
+        )
+        if not matches_identity:
+            continue
+        logged_scope = metadata.get("steering_scope")
+        if steering_scope is not None and logged_scope != steering_scope:
+            raise RuntimeError(
+                f"Existing {evaluation} log {path} uses steering_scope="
+                f"{logged_scope!r}, expected {steering_scope!r}. Use a new results "
+                "directory rather than mixing intervention protocols."
+            )
+        logs.append(log)
     return logs
+
+
+def retry_safe_log(log: Any) -> Any:
+    """Neutralize Inspect 0.3.251's ``False``-as-shuffle-seed retry bug.
+
+    Inspect's retry loader checks whether ``sample_shuffle is not None`` and
+    then passes a false value directly to ``Dataset.shuffle``. Since ``False``
+    is also integer seed zero, a task originally configured with
+    ``sample_shuffle=False`` is unexpectedly shuffled during retry. Preserve
+    the original log and give ``eval_retry`` a copy whose task-level shuffle
+    override is unset; the task's own ``shuffle=False`` argument remains in
+    ``task_args_passed`` and reconstructs the intended dataset order.
+    """
+    eval_spec = getattr(log, "eval", None)
+    eval_config = getattr(eval_spec, "config", None)
+    if eval_config is None or getattr(eval_config, "sample_shuffle", None) is not False:
+        return log
+    safe = deepcopy(log)
+    safe.eval.config.sample_shuffle = None
+    return safe
+
+
+def _sample_payload(sample: Any) -> dict[str, Any]:
+    """Return a stable JSON representation of an Inspect dataset sample."""
+    if not hasattr(sample, "model_dump"):
+        raise TypeError(f"Expected an Inspect Sample, got {type(sample).__name__}")
+    payload = sample.model_dump(mode="json")
+    if not isinstance(payload, dict):
+        raise TypeError("Inspect Sample.model_dump() did not return an object")
+    return payload
+
+
+def task_sample_contract(
+    task: Any,
+    evaluation: str,
+    expected_samples: int,
+    steering_scope: str | None = None,
+) -> dict[str, Any]:
+    """Fingerprint the exact ordered task samples selected before generation."""
+    samples = list(task.dataset)[:expected_samples]
+    if len(samples) != expected_samples:
+        raise ValueError(
+            f"{evaluation} contains {len(samples)} samples, expected "
+            f"{expected_samples}"
+        )
+    records: list[dict[str, str]] = []
+    for sample in samples:
+        sample_id = getattr(sample, "id", None)
+        if sample_id is None:
+            raise ValueError(f"{evaluation} contains a sample without an id")
+        serialized = json.dumps(
+            _sample_payload(sample),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        records.append({
+            "id": str(sample_id),
+            "sample_sha256": hashlib.sha256(serialized).hexdigest(),
+        })
+    ids = [record["id"] for record in records]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{evaluation} selected duplicate sample ids")
+    contract = {
+        "evaluation": evaluation,
+        "sample_count": expected_samples,
+        "samples": records,
+    }
+    if steering_scope is not None:
+        contract["steering_scope"] = steering_scope
+    return contract
+
+
+def ensure_evaluation_sample_contract(
+    result_root: Path,
+    contracts: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Persist or verify immutable sample IDs and payloads for a layer run."""
+    payload = {"version": 1, "evaluations": contracts}
+    path = result_root / SAMPLE_CONTRACT_FILENAME
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != payload:
+            raise ValueError(
+                f"Evaluation sample contract changed since the original run: {path}. "
+                "Do not resume with different samples, prompts, targets, or metadata."
+            )
+        return contracts
+
+    result_root.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return contracts
+
+
+def assert_log_matches_sample_contract(
+    log: Any,
+    contract: dict[str, Any],
+) -> None:
+    """Reject a generated or reused log whose selected dataset has drifted."""
+    evaluation = str(contract["evaluation"])
+    expected_ids = [str(row["id"]) for row in contract["samples"]]
+    dataset = getattr(getattr(log, "eval", None), "dataset", None)
+    dataset_ids = getattr(dataset, "sample_ids", None)
+    if dataset_ids is None:
+        actual_ids = [str(sample.id) for sample in (log.samples or [])]
+    else:
+        actual_ids = [str(sample_id) for sample_id in dataset_ids]
+    if actual_ids != expected_ids:
+        missing = sorted(set(expected_ids).difference(actual_ids))
+        unexpected = sorted(set(actual_ids).difference(expected_ids))
+        raise RuntimeError(
+            f"{evaluation} log does not match {SAMPLE_CONTRACT_FILENAME}: "
+            f"expected {len(expected_ids)} ordered ids, got {len(actual_ids)}; "
+            f"missing={missing[:5]}, unexpected={unexpected[:5]}"
+        )
+
+    logged_ids = [str(sample.id) for sample in (log.samples or [])]
+    if len(logged_ids) != len(expected_ids) or set(logged_ids) != set(expected_ids):
+        raise RuntimeError(
+            f"{evaluation} log samples do not contain exactly the contracted ids"
+        )
 
 
 def generate_or_resume_task(
@@ -215,12 +379,15 @@ def generate_or_resume_task(
     evaluation: str,
     expected_samples: int,
     coefficient: float,
+    steering_scope: str,
 ) -> Any:
     """Reuse a complete log or retry the best interrupted log before starting anew."""
     from inspect_ai import eval as inspect_eval
     from inspect_ai import eval_retry
 
-    existing = existing_generation_logs(log_dir, evaluation, coefficient)
+    existing = existing_generation_logs(
+        log_dir, evaluation, coefficient, steering_scope
+    )
     complete = [
         log
         for log in existing
@@ -248,9 +415,10 @@ def generate_or_resume_task(
             expected_samples,
             selected.location,
         )
+        selected_for_retry = retry_safe_log(selected)
         return require_generated_eval(
             eval_retry(
-                selected,
+                selected_for_retry,
                 log_dir=str(log_dir),
                 display="plain",
                 max_samples=1,
@@ -273,7 +441,8 @@ def generate_or_resume_task(
 
 def run_generations(
     wrapper: SteeredModel,
-    inspect_model: Any,
+    sycophancy_model: Any,
+    coherence_model: Any,
     coefficients: tuple[float, ...],
     result_root: Path,
     sycophancy_limit: int,
@@ -283,7 +452,35 @@ def run_generations(
     """Generate and persist all target-model responses without judge calls."""
     from inspect_evals.sycophancy import sycophancy
 
-    manifest: list[dict[str, Any]] = []
+    coefficients = validate_steering_coefficients(coefficients)
+    sycophancy_eval = sycophancy(shuffle=False, scorer_model=sycophancy_model)
+    coherence_eval = coherence_task(config.COHERENCE_DATASET, coherence_model)
+    contracts = ensure_evaluation_sample_contract(
+        result_root,
+        {
+            "sycophancy": task_sample_contract(
+                sycophancy_eval,
+                "sycophancy",
+                sycophancy_limit,
+                STEERING_SCOPE_SECOND_ASSISTANT,
+            ),
+            "coherence": task_sample_contract(
+                coherence_eval,
+                "coherence",
+                coherence_limit,
+                STEERING_SCOPE_ALWAYS,
+            ),
+        },
+    )
+    manifest = load_generation_manifest(result_root)
+    existing_coefficients = tuple(
+        float(row["coefficient"])
+        for row in manifest
+        if "coefficient" in row
+    )
+    validate_steering_coefficients(
+        tuple(dict.fromkeys((*existing_coefficients, *coefficients)))
+    )
     for coefficient in tqdm(
         coefficients, desc="Generating steering coefficients", unit="coefficient"
     ):
@@ -291,14 +488,12 @@ def run_generations(
         slug = coefficient_slug(coefficient)
         log_dir = result_root / "inspect_logs" / f"alpha_{slug}"
         common = {
-            "model": inspect_model,
             "log_dir": str(log_dir),
             "log_format": "eval",
             "log_samples": True,
             "display": "plain",
             "max_samples": 1,
             "max_tasks": 1,
-            "sample_shuffle": False,
             "temperature": config.TEMPERATURE,
             "top_p": config.TOP_P,
             "max_tokens": config.MAX_NEW_TOKENS,
@@ -308,12 +503,12 @@ def run_generations(
             "task_retry_attempts": 0,
             "fail_on_error": False,
             "continue_on_fail": True,
-            "metadata": {
-                "steering_coefficient": coefficient,
-                "target_layer": wrapper.target_layer,
-                "target_layer_fraction": target_layer_fraction,
-                "activation_site": wrapper.activation_site,
-            },
+        }
+        base_metadata = {
+            "steering_coefficient": coefficient,
+            "target_layer": wrapper.target_layer,
+            "target_layer_fraction": target_layer_fraction,
+            "activation_site": wrapper.activation_site,
         }
         logger.info(
             "alpha=%g: generating sycophancy responses (%d samples)",
@@ -324,26 +519,45 @@ def run_generations(
             # Inspect constructs task scorers even when score=False. Give it
             # the already loaded local model so GPU generation requires no
             # hosted-judge credentials; local rescoring replaces the scorer.
-            sycophancy(shuffle=False, scorer_model=inspect_model),
-            common,
+            sycophancy_eval,
+            {
+                **common,
+                "model": sycophancy_model,
+                "metadata": {
+                    **base_metadata,
+                    "steering_scope": STEERING_SCOPE_SECOND_ASSISTANT,
+                },
+            },
             log_dir,
             "sycophancy",
             sycophancy_limit,
             coefficient,
+            STEERING_SCOPE_SECOND_ASSISTANT,
         )
+        assert_log_matches_sample_contract(syc_log, contracts["sycophancy"])
         logger.info(
             "alpha=%g: generating coherence responses (%d samples)",
             coefficient,
             coherence_limit,
         )
         coherence_log = generate_or_resume_task(
-            coherence_task(config.COHERENCE_DATASET, inspect_model),
-            common,
+            coherence_eval,
+            {
+                **common,
+                "model": coherence_model,
+                "metadata": {
+                    **base_metadata,
+                    "steering_scope": STEERING_SCOPE_ALWAYS,
+                },
+            },
             log_dir,
             "coherence",
             coherence_limit,
             coefficient,
+            STEERING_SCOPE_ALWAYS,
         )
+        assert_log_matches_sample_contract(coherence_log, contracts["coherence"])
+        generated_rows: list[dict[str, Any]] = []
         for evaluation, log in (
             ("sycophancy", syc_log),
             ("coherence", coherence_log),
@@ -355,7 +569,7 @@ def run_generations(
                 )
             except (AttributeError, ValueError):
                 portable_location = str(location) if location is not None else None
-            manifest.append(
+            generated_rows.append(
                 {
                     "coefficient": float(coefficient),
                     "evaluation": evaluation,
@@ -363,13 +577,67 @@ def run_generations(
                     "samples": len(log.samples or []),
                     "target_layer": wrapper.target_layer,
                     "target_layer_fraction": target_layer_fraction,
+                    "steering_scope": (
+                        STEERING_SCOPE_SECOND_ASSISTANT
+                        if evaluation == "sycophancy"
+                        else STEERING_SCOPE_ALWAYS
+                    ),
                 }
             )
-        result_root.mkdir(parents=True, exist_ok=True)
-        (result_root / "generation_manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        manifest = merge_generation_manifest(result_root, generated_rows)
+    return manifest
+
+
+def load_generation_manifest(result_root: Path) -> list[dict[str, Any]]:
+    """Load a layer manifest, preserving prior runs when generation is extended."""
+    path = result_root / "generation_manifest.json"
+    if not path.is_file():
+        return []
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError(f"Expected a list of objects in {path}")
+    return rows
+
+
+def _generation_manifest_key(row: dict[str, Any]) -> tuple[float, str]:
+    try:
+        coefficient = float(row["coefficient"])
+        evaluation = str(row["evaluation"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Generation manifest rows require coefficient and evaluation"
+        ) from exc
+    return coefficient, evaluation
+
+
+def merge_generation_manifest(
+    result_root: Path,
+    new_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Upsert completed tasks without dropping entries from earlier runs."""
+    manifest = load_generation_manifest(result_root)
+    positions: dict[tuple[float, str], int] = {}
+    for index, row in enumerate(manifest):
+        key = _generation_manifest_key(row)
+        if key in positions:
+            raise ValueError(f"Duplicate generation manifest entry: {key!r}")
+        positions[key] = index
+    for row in new_rows:
+        key = _generation_manifest_key(row)
+        if key in positions:
+            manifest[positions[key]] = row
+        else:
+            positions[key] = len(manifest)
+            manifest.append(row)
+
+    result_root.mkdir(parents=True, exist_ok=True)
+    path = result_root / "generation_manifest.json"
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
     return manifest
 
 
@@ -465,6 +733,7 @@ def resume_layer_generation(
     target_layer_fraction: float,
     artifact_root: Path,
     result_root: Path,
+    steering_coefficients: tuple[float, ...] | None = None,
 ) -> None:
     """Generate one layer from its saved probe, reusing interrupted Inspect logs."""
     import torch
@@ -539,7 +808,7 @@ def resume_layer_generation(
     assert_zero_equivalence(
         wrapper, check["input_ids"].to(device), check["attention_mask"].to(device)
     )
-    inspect_model = make_inspect_model(
+    sycophancy_model = make_inspect_model(
         wrapper,
         config.MODEL_NAME,
         config.MAX_NEW_TOKENS,
@@ -547,15 +816,33 @@ def resume_layer_generation(
         config.TOP_P,
         config.SEED,
         config.CHAT_TEMPLATE_KWARGS,
-        api_name=f"local-steered-layer-{target_layer}",
+        api_name=f"local-second-response-layer-{target_layer}",
+        steering_scope=STEERING_SCOPE_SECOND_ASSISTANT,
     )
-    coefficients = tuple(float(value) for value in metadata["steering_coefficients"])
+    coherence_model = make_inspect_model(
+        wrapper,
+        config.MODEL_NAME,
+        config.MAX_NEW_TOKENS,
+        config.TEMPERATURE,
+        config.TOP_P,
+        config.SEED,
+        config.CHAT_TEMPLATE_KWARGS,
+        api_name=f"local-all-responses-layer-{target_layer}",
+        steering_scope=STEERING_SCOPE_ALWAYS,
+    )
+    if steering_coefficients is None:
+        coefficients = validate_steering_coefficients(
+            tuple(float(value) for value in metadata["steering_coefficients"])
+        )
+    else:
+        coefficients = validate_steering_coefficients(steering_coefficients)
     sycophancy_limit = int(metadata["sycophancy_sample_limit"])
     coherence_limit = int(metadata["coherence_sample_limit"])
     logger.info(
-        "Resuming only fraction=%g (layer=%d) from %s into %s",
+        "Resuming fraction=%g (layer=%d) for coefficients %s from %s into %s",
         fraction,
         target_layer,
+        ", ".join(f"{value:g}" for value in coefficients),
         artifact_directory,
         result_directory,
     )
@@ -566,7 +853,8 @@ def resume_layer_generation(
         started = log_stage(f"Layer {target_layer}: resuming behavioral generation")
         run_generations(
             wrapper,
-            inspect_model,
+            sycophancy_model,
+            coherence_model,
             coefficients,
             result_directory,
             sycophancy_limit,
@@ -668,6 +956,8 @@ def run_layer_experiment(
         "seed": config.SEED,
         "steering_coefficients": list(config.STEERING_COEFFICIENTS),
         "judge_model": config.JUDGE_MODEL,
+        "sycophancy_steering_scope": STEERING_SCOPE_SECOND_ASSISTANT,
+        "coherence_steering_scope": STEERING_SCOPE_ALWAYS,
         "sycophancy_sample_limit": config.SYCOPHANCY_SAMPLE_LIMIT,
         "coherence_sample_limit": config.COHERENCE_SAMPLE_LIMIT,
     }
@@ -709,7 +999,7 @@ def run_layer_experiment(
     assert_zero_equivalence(
         wrapper, check["input_ids"].to(device), check["attention_mask"].to(device)
     )
-    inspect_model = make_inspect_model(
+    sycophancy_model = make_inspect_model(
         wrapper,
         config.MODEL_NAME,
         config.MAX_NEW_TOKENS,
@@ -717,12 +1007,25 @@ def run_layer_experiment(
         config.TOP_P,
         config.SEED,
         config.CHAT_TEMPLATE_KWARGS,
-        api_name=f"local-steered-layer-{target_layer}",
+        api_name=f"local-second-response-layer-{target_layer}",
+        steering_scope=STEERING_SCOPE_SECOND_ASSISTANT,
+    )
+    coherence_model = make_inspect_model(
+        wrapper,
+        config.MODEL_NAME,
+        config.MAX_NEW_TOKENS,
+        config.TEMPERATURE,
+        config.TOP_P,
+        config.SEED,
+        config.CHAT_TEMPLATE_KWARGS,
+        api_name=f"local-all-responses-layer-{target_layer}",
+        steering_scope=STEERING_SCOPE_ALWAYS,
     )
     started = log_stage(f"Layer {target_layer}: generating behavioral responses")
     run_generations(
         wrapper,
-        inspect_model,
+        sycophancy_model,
+        coherence_model,
         config.STEERING_COEFFICIENTS,
         result_directory,
         config.SYCOPHANCY_SAMPLE_LIMIT,
@@ -737,7 +1040,8 @@ def run_layer_experiment(
             wrapper.unit_direction = equal_norm_random_direction(primary, config.SEED)
             run_generations(
                 wrapper,
-                inspect_model,
+                sycophancy_model,
+                coherence_model,
                 config.STEERING_COEFFICIENTS,
                 result_directory / "random_direction_control",
                 min(config.SYCOPHANCY_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
@@ -845,10 +1149,34 @@ def _run() -> None:
     notify(f"run.py completed successfully. Results: {config.RESULTS_DIR}")
 
 
+def saved_layer_fractions(artifact_root: Path) -> tuple[float, ...]:
+    """Read saved layer fractions in sweep order from an artifact root."""
+    manifest_path = artifact_root / "layer_sweep_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Resume-all requires the saved sweep manifest {manifest_path}"
+        )
+    rows = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"Expected a non-empty list in {manifest_path}")
+    try:
+        fractions = tuple(float(row["target_layer_fraction"]) for row in rows)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Every row in {manifest_path} needs target_layer_fraction"
+        ) from exc
+    if not all(math.isfinite(fraction) for fraction in fractions):
+        raise ValueError(f"Saved layer fractions in {manifest_path} must be finite")
+    if len(set(fractions)) != len(fractions):
+        raise ValueError(f"Saved layer fractions in {manifest_path} must be unique")
+    return fractions
+
+
 def _resume_generation(
-    fraction: float,
+    fraction: float | None,
     artifact_root: Path,
     result_root: Path,
+    steering_coefficients: tuple[float, ...] | None = None,
 ) -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -861,21 +1189,28 @@ def _resume_generation(
     started = log_stage("Loading tokenizer and model for generation resume")
     model, tokenizer = load_model_once()
     log_stage_done("Model load", started)
-    resume_layer_generation(
-        model,
-        tokenizer,
-        fraction,
-        artifact_root,
-        result_root,
+    fractions = (
+        saved_layer_fractions(artifact_root) if fraction is None else (fraction,)
     )
+    for saved_fraction in fractions:
+        resume_layer_generation(
+            model,
+            tokenizer,
+            saved_fraction,
+            artifact_root,
+            result_root,
+            steering_coefficients,
+        )
     logger.info(
-        "Layer generation resume complete. Download %s and run "
+        "Generation resume complete for %d layer(s). Download %s and run "
         "`python score_results.py %s` locally",
+        len(fractions),
         result_root,
         result_root,
     )
     notify(
-        f"run.py generation resume completed successfully for fraction={fraction:g}. "
+        f"run.py generation resume completed successfully for {len(fractions)} "
+        "layer(s). "
         f"Results: {result_root}"
     )
 
@@ -889,10 +1224,24 @@ def main() -> None:
         raise
 
 
-def resume_main(fraction: float, artifact_root: Path, result_root: Path) -> None:
-    """Resume one saved layer and report any uncaught error before propagating it."""
+def resume_main(
+    fraction: float | None,
+    artifact_root: Path,
+    result_root: Path,
+    steering_coefficients: tuple[float, ...] | None = None,
+) -> None:
+    """Resume saved layers and report any uncaught error before propagating it."""
     try:
-        _resume_generation(fraction, artifact_root, result_root)
+        if steering_coefficients is not None:
+            steering_coefficients = validate_steering_coefficients(
+                steering_coefficients
+            )
+        _resume_generation(
+            fraction,
+            artifact_root,
+            result_root,
+            steering_coefficients,
+        )
     except Exception as exc:
         notify(f"run.py resume failed with {type(exc).__name__}: {exc}")
         raise
@@ -902,11 +1251,17 @@ def cli(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Train a layer sweep or resume generation from a saved layer probe."
     )
-    parser.add_argument(
+    resume_mode = parser.add_mutually_exclusive_group()
+    resume_mode.add_argument(
         "--resume-generation",
         type=float,
         metavar="FRACTION",
         help="Skip probe training and generate only this saved layer fraction.",
+    )
+    resume_mode.add_argument(
+        "--resume-all",
+        action="store_true",
+        help="Generate from every layer listed in the saved artifact manifest.",
     )
     parser.add_argument(
         "--artifacts-dir",
@@ -920,19 +1275,45 @@ def cli(argv: list[str] | None = None) -> None:
         default=config.RESULTS_DIR,
         help="Result root containing any interrupted Inspect logs.",
     )
+    parser.add_argument(
+        "--steering-coefficients",
+        type=float,
+        nargs="+",
+        metavar="ALPHA",
+        help=(
+            "Coefficients to generate during resume. Existing logs and manifest "
+            "entries are preserved and reused."
+        ),
+    )
     args = parser.parse_args(argv)
-    if args.resume_generation is None:
+    is_resume = args.resume_generation is not None or args.resume_all
+    if not is_resume:
         if (
             args.artifacts_dir != config.ARTIFACTS_DIR
             or args.results_dir != config.RESULTS_DIR
         ):
             parser.error(
                 "--artifacts-dir and --results-dir are only valid with "
-                "--resume-generation"
+                "--resume-generation or --resume-all"
             )
+        if args.steering_coefficients is not None:
+            parser.error("--steering-coefficients is only valid during resume")
         main()
     else:
-        resume_main(args.resume_generation, args.artifacts_dir, args.results_dir)
+        try:
+            coefficients = (
+                validate_steering_coefficients(tuple(args.steering_coefficients))
+                if args.steering_coefficients is not None
+                else None
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        resume_main(
+            None if args.resume_all else args.resume_generation,
+            args.artifacts_dir,
+            args.results_dir,
+            coefficients,
+        )
 
 
 if __name__ == "__main__":

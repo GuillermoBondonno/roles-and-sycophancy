@@ -29,6 +29,24 @@ def test_generation_sources_discovers_every_layer_manifest(tmp_path: Path) -> No
     }
 
 
+def test_generation_sources_includes_logs_missing_from_manifest(tmp_path: Path) -> None:
+    experiment_root = tmp_path / "layer_7_fraction_0p25"
+    manifested = experiment_root / "inspect_logs" / "alpha_m7" / "one.eval"
+    orphaned = experiment_root / "inspect_logs" / "alpha_m6" / "two.eval"
+    manifested.parent.mkdir(parents=True)
+    orphaned.parent.mkdir(parents=True)
+    manifested.touch()
+    orphaned.touch()
+    (experiment_root / "generation_manifest.json").write_text(
+        json.dumps([{"log": str(manifested.relative_to(experiment_root))}]),
+        encoding="utf-8",
+    )
+
+    sources = generation_sources(tmp_path)
+
+    assert [source for _, source in sources] == [manifested, orphaned]
+
+
 def test_writes_combined_layer_sweep_summary(tmp_path: Path) -> None:
     roots: set[Path] = set()
     for layer, fraction in ((7, 0.25), (14, 0.5)):

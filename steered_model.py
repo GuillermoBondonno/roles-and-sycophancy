@@ -8,6 +8,11 @@ from typing import Any, Iterator
 import torch
 
 
+STEERING_SCOPE_ALWAYS = "all_assistant_responses"
+STEERING_SCOPE_SECOND_ASSISTANT = "second_assistant_response_only"
+STEERING_SCOPES = {STEERING_SCOPE_ALWAYS, STEERING_SCOPE_SECOND_ASSISTANT}
+
+
 class SteeredModel:
     """A loaded causal LM with a mutable activation-steering coefficient."""
 
@@ -115,8 +120,14 @@ def make_inspect_model(
     seed: int,
     chat_template_kwargs: dict[str, Any] | None = None,
     api_name: str = "local-steered",
+    steering_scope: str = STEERING_SCOPE_ALWAYS,
 ) -> Any:
     """Expose the existing local model instance directly to current Inspect AI."""
+    if steering_scope not in STEERING_SCOPES:
+        raise ValueError(
+            f"Unknown steering scope {steering_scope!r}; expected one of "
+            f"{sorted(STEERING_SCOPES)}"
+        )
     from inspect_ai.model import (
         ChatMessage,
         GenerateConfig,
@@ -198,7 +209,18 @@ def make_inspect_model(
             if config.stop_seqs:
                 generation["stop_strings"] = config.stop_seqs
                 generation["tokenizer"] = wrapper.tokenizer
-            generated = wrapper.generate(**generation)
+            configured_coefficient = float(wrapper.coefficient)
+            assistant_messages = sum(message.role == "assistant" for message in input)
+            apply_steering = (
+                steering_scope == STEERING_SCOPE_ALWAYS
+                or assistant_messages == 1
+            )
+            applied_coefficient = configured_coefficient if apply_steering else 0.0
+            wrapper.coefficient = applied_coefficient
+            try:
+                generated = wrapper.generate(**generation)
+            finally:
+                wrapper.coefficient = configured_coefficient
             prompt_tokens = encoded["input_ids"].shape[1]
             new_ids = generated[0, prompt_tokens:]
             completion = wrapper.tokenizer.decode(new_ids, skip_special_tokens=True)
@@ -210,7 +232,10 @@ def make_inspect_model(
                 total_tokens=int(prompt_tokens + len(new_ids)),
             )
             output.metadata = {
-                "steering_coefficient": wrapper.coefficient,
+                "steering_coefficient": configured_coefficient,
+                "applied_steering_coefficient": applied_coefficient,
+                "steering_scope": steering_scope,
+                "assistant_response_number": assistant_messages + 1,
                 "target_layer": wrapper.target_layer,
             }
             return output

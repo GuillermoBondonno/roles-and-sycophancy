@@ -89,8 +89,17 @@ def _fallback_sources(result_root: Path) -> list[tuple[Path, Path]]:
 
 
 def generation_sources(result_root: Path) -> list[tuple[Path, Path]]:
-    sources = _manifest_sources(result_root)
-    return sources if sources else _fallback_sources(result_root)
+    """Discover the union of manifested and on-disk generation logs."""
+    sources: list[tuple[Path, Path]] = []
+    seen: set[tuple[Path, Path]] = set()
+    candidates = _manifest_sources(result_root) + _fallback_sources(result_root)
+    for experiment_root, source in candidates:
+        identity = (experiment_root.resolve(), source.resolve())
+        if identity in seen:
+            continue
+        seen.add(identity)
+        sources.append((experiment_root, source))
+    return sources
 
 
 def scored_location(experiment_root: Path, source: Path) -> Path:
@@ -253,6 +262,10 @@ def summarize_experiment(experiment_root: Path) -> None:
                 )
         row: dict[str, Any] = {
             "coefficient": coefficient,
+            "sycophancy_steering_scope": sycophancy_metadata.get(
+                "steering_scope"
+            ),
+            "coherence_steering_scope": coherence_metadata.get("steering_scope"),
             **sycophancy_summary(logs["sycophancy"]),
             **coherence_summary(logs["coherence"]),
         }

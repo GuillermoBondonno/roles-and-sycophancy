@@ -74,11 +74,17 @@ optional fixed-seed, equal-norm random control can be evaluated by setting
 
 During generation the feed-forward-input pre-hook changes only the final
 position in the initial prefill and the current position in each cached
-autoregressive step. It
-never changes weights or shared tensors, keeps dtype/device unchanged, and is
-removed in `finally`. The same loaded model instance, base passages, role
-variants, and train/validation split are used for all layers and coefficients.
-Activations and probes are computed separately at every resolved layer.
+autoregressive step. In the sycophancy task, the initial assistant answer is
+always generated with an applied coefficient of zero; the configured
+coefficient is applied only while generating the second assistant response
+after “Are you sure?”. Coherence responses remain steered so they continue to
+measure intervention quality. Separate Inspect model providers encode these
+two scopes, and the scope is saved in log metadata and generation manifests so
+incompatible old logs cannot be reused during resume. The hook never changes
+weights or shared tensors, keeps dtype/device unchanged, and is removed in
+`finally`. The same loaded model instance, base passages, role variants, and
+train/validation split are used for all layers and coefficients. Activations
+and probes are computed separately at every resolved layer.
 
 ## Evaluation
 
@@ -168,6 +174,16 @@ task log:
 python run.py --resume-generation 0.75
 ```
 
+Each layer result directory also contains
+`evaluation_sample_contract.json`, which fixes the ordered sample IDs, a hash
+of every source sample, and each task's steering scope before generation
+begins. Fresh, reused, and retried logs are checked against this contract before
+they can enter the generation manifest. Resume also clears Inspect 0.3.251's
+task-level `sample_shuffle=False` override before `eval_retry`: that version
+otherwise treats the false value as integer seed zero and shuffles the retry
+dataset. New evaluations rely on each task's explicit `shuffle=False` setting
+and leave Inspect's separate retry-sensitive shuffle override unset.
+
 Use explicit roots when the downloaded checkpoint directories have different
 names, as in the August 2 copy in this checkout:
 
@@ -177,6 +193,23 @@ python run.py --resume-generation 0.75 \
   --results-dir results_aug_2_v2
 ```
 
+To add coefficients to every saved layer in an existing sweep, pass only the
+new coefficients with `--resume-all`. The model is loaded once, complete logs
+are reused, and new task entries are merged into each existing generation
+manifest. Neither the saved probe metadata nor earlier results are rewritten:
+
+```bash
+python run.py --resume-all \
+  --artifacts-dir artifacts_aug_2_v2_combined \
+  --results-dir results_aug_2_v2_combined \
+  --steering-coefficients -8 -6 -4 -2
+```
+
+This command is idempotent: rerunning it resumes partial logs and reuses complete
+ones. The result directory remains equivalent to one sweep containing both the
+old and new coefficients. Coefficients must be finite and unique; values that
+would produce the same output-directory slug are rejected.
+
 Download the resulting `results/` directory to a local checkout with the same
 dependencies and run:
 
@@ -184,11 +217,13 @@ dependencies and run:
 python score_results.py results
 ```
 
-Plot any layer's resulting `summary.json` as a four-panel dashboard. The default
-output is `<layer-results>/summary_plot.png`; `.pdf` and `.svg` outputs are also
-supported.
+Plot either the complete layer sweep or any individual layer as a four-panel
+dashboard. Plotting a sweep creates one dashboard in each layer directory. The
+default output is `<layer-results>/summary_plot.png`; `.pdf` and `.svg` outputs
+are also supported.
 
 ```bash
+python plot_results.py results
 python plot_results.py results/layer_14_fraction_0p5
 python plot_results.py results/layer_14_fraction_0p5 --output figures/experiment.svg
 ```
