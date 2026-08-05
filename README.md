@@ -67,9 +67,16 @@ h' = h + alpha * scale * v_hat
 Positive `alpha` adds candidate Userness; negative `alpha` subtracts it; zero
 runs through the same hook with a zero shift. Before behavioral evaluation, the
 probe artifact records how every configured `alpha` changes probe-predicted
-Userness on held-out activations. An optional mean-difference direction is saved
-for comparison in raw, unit-normalized, and held-out-scaled forms, and an
-optional fixed-seed, equal-norm random control can be evaluated by setting
+Userness on held-out activations. A mean-difference alternative is also saved:
+
+```text
+v_mean = mean(h_train | user) - mean(h_train | non-user)
+v_mean_hat = v_mean / ||v_mean||_2
+mean_scale = sample_std(h_validation @ v_mean_hat)
+```
+
+It is stored in raw, unit-normalized, and held-out-scaled forms. An optional
+fixed-seed, equal-norm random control can be evaluated by setting
 `RUN_RANDOM_DIRECTION_CONTROL = True`.
 
 During generation the feed-forward-input pre-hook changes only the final
@@ -209,6 +216,26 @@ This command is idempotent: rerunning it resumes partial logs and reuses complet
 ones. The result directory remains equivalent to one sweep containing both the
 old and new coefficients. Coefficients must be finite and unique; values that
 would produce the same output-directory slug are rejected.
+
+To generate from the saved mean-difference direction instead of the logistic
+probe direction, select it during resume. Use a new result root: generation
+logs and manifests record the direction identity and deliberately reject a
+directory containing a different steering direction.
+
+```bash
+python run.py --resume-all \
+  --artifacts-dir artifacts_aug_2_v2_combined \
+  --results-dir results_mean_difference \
+  --steering-direction mean-difference \
+  --steering-coefficients -3 -1.5 0 1.5 3
+
+python score_results.py results_mean_difference
+```
+
+The mean-difference direction uses its own saved held-out projection scale, so
+the coefficient retains the same standard-deviation interpretation as in the
+probe-direction sweep. `probe` remains the default direction for backward
+compatibility with existing runs.
 
 Download the resulting `results/` directory to a local checkout with the same
 dependencies and run:

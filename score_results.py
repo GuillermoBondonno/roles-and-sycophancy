@@ -17,7 +17,7 @@ from evals import (
     save_per_sample,
     sycophancy_summary,
 )
-from run import coefficient_slug
+from run import coefficient_slug, logged_steering_direction
 
 
 logger = logging.getLogger(__name__)
@@ -230,6 +230,7 @@ def summarize_experiment(experiment_root: Path) -> None:
     from inspect_ai.log import read_eval_log
 
     grouped: dict[float, dict[str, Any]] = {}
+    experiment_direction: str | None = None
     scored_root = experiment_root / "scored_logs"
     if not scored_root.exists():
         return
@@ -241,6 +242,15 @@ def summarize_experiment(experiment_root: Path) -> None:
         if not fully_scored(log, evaluation):
             continue
         metadata = log.eval.metadata or {}
+        direction = logged_steering_direction(metadata)
+        if experiment_direction is None:
+            experiment_direction = direction
+        elif direction != experiment_direction:
+            raise ValueError(
+                f"Scored logs below {experiment_root} mix steering directions "
+                f"{experiment_direction!r} and {direction!r}; use separate results "
+                "directories."
+            )
         coefficient = float(metadata["steering_coefficient"])
         grouped.setdefault(coefficient, {})[evaluation] = log
 
@@ -262,6 +272,9 @@ def summarize_experiment(experiment_root: Path) -> None:
                 )
         row: dict[str, Any] = {
             "coefficient": coefficient,
+            "steering_direction": logged_steering_direction(
+                sycophancy_metadata
+            ),
             "sycophancy_steering_scope": sycophancy_metadata.get(
                 "steering_scope"
             ),
@@ -340,11 +353,13 @@ def score_results(result_root: Path) -> None:
         evaluation = evaluation_name(generated)
         coefficient = float((generated.eval.metadata or {})["steering_coefficient"])
         metadata = generated.eval.metadata or {}
+        direction = logged_steering_direction(metadata)
         logger.info(
-            "Scoring %s at layer=%s (fraction=%s), alpha=%g",
+            "Scoring %s at layer=%s (fraction=%s, direction=%s), alpha=%g",
             evaluation,
             metadata.get("target_layer", "legacy"),
             metadata.get("target_layer_fraction", "legacy"),
+            direction,
             coefficient,
         )
         scored = score_log_incrementally(

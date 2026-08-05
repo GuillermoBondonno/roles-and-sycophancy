@@ -45,6 +45,21 @@ from utils import send_ntfy_message
 logger = logging.getLogger(__name__)
 NTFY_TOPIC = "roles_and_sycophancy_experiment_rbi24u"
 SAMPLE_CONTRACT_FILENAME = "evaluation_sample_contract.json"
+STEERING_DIRECTION_PROBE = "probe"
+STEERING_DIRECTION_MEAN_DIFFERENCE = "mean-difference"
+STEERING_DIRECTION_RANDOM_CONTROL = "random-control"
+STEERING_DIRECTION_FIELDS = {
+    STEERING_DIRECTION_PROBE: ("direction_unit", "projection_scale"),
+    STEERING_DIRECTION_MEAN_DIFFERENCE: (
+        "mean_difference_direction_unit",
+        "mean_difference_projection_scale",
+    ),
+}
+
+
+def logged_steering_direction(metadata: dict[str, Any]) -> str:
+    """Read direction identity while treating legacy logs as probe runs."""
+    return str(metadata.get("steering_direction", STEERING_DIRECTION_PROBE))
 
 
 def notify(message: str) -> None:
@@ -209,6 +224,7 @@ def existing_generation_logs(
     evaluation: str,
     coefficient: float,
     steering_scope: str | None = None,
+    steering_direction: str = STEERING_DIRECTION_PROBE,
 ) -> list[Any]:
     """Read matching completed or interrupted logs from one alpha directory."""
     from inspect_ai.log import read_eval_log
@@ -241,6 +257,13 @@ def existing_generation_logs(
                 f"Existing {evaluation} log {path} uses steering_scope="
                 f"{logged_scope!r}, expected {steering_scope!r}. Use a new results "
                 "directory rather than mixing intervention protocols."
+            )
+        logged_direction = logged_steering_direction(metadata)
+        if logged_direction != steering_direction:
+            raise RuntimeError(
+                f"Existing {evaluation} log {path} uses steering_direction="
+                f"{logged_direction!r}, expected {steering_direction!r}. Use a new "
+                "results directory rather than mixing steering directions."
             )
         logs.append(log)
     return logs
@@ -380,13 +403,14 @@ def generate_or_resume_task(
     expected_samples: int,
     coefficient: float,
     steering_scope: str,
+    steering_direction: str = STEERING_DIRECTION_PROBE,
 ) -> Any:
     """Reuse a complete log or retry the best interrupted log before starting anew."""
     from inspect_ai import eval as inspect_eval
     from inspect_ai import eval_retry
 
     existing = existing_generation_logs(
-        log_dir, evaluation, coefficient, steering_scope
+        log_dir, evaluation, coefficient, steering_scope, steering_direction
     )
     complete = [
         log
@@ -448,6 +472,7 @@ def run_generations(
     sycophancy_limit: int,
     coherence_limit: int,
     target_layer_fraction: float,
+    steering_direction: str = STEERING_DIRECTION_PROBE,
 ) -> list[dict[str, Any]]:
     """Generate and persist all target-model responses without judge calls."""
     from inspect_evals.sycophancy import sycophancy
@@ -473,6 +498,17 @@ def run_generations(
         },
     )
     manifest = load_generation_manifest(result_root)
+    manifest_directions = {
+        str(row.get("steering_direction", STEERING_DIRECTION_PROBE))
+        for row in manifest
+    }
+    if manifest_directions and manifest_directions != {steering_direction}:
+        raise RuntimeError(
+            f"Existing generation manifest in {result_root} uses steering "
+            f"direction(s) {sorted(manifest_directions)!r}, expected "
+            f"{steering_direction!r}. Use a new results directory rather than "
+            "mixing steering directions."
+        )
     existing_coefficients = tuple(
         float(row["coefficient"])
         for row in manifest
@@ -506,6 +542,7 @@ def run_generations(
         }
         base_metadata = {
             "steering_coefficient": coefficient,
+            "steering_direction": steering_direction,
             "target_layer": wrapper.target_layer,
             "target_layer_fraction": target_layer_fraction,
             "activation_site": wrapper.activation_site,
@@ -533,6 +570,7 @@ def run_generations(
             sycophancy_limit,
             coefficient,
             STEERING_SCOPE_SECOND_ASSISTANT,
+            steering_direction,
         )
         assert_log_matches_sample_contract(syc_log, contracts["sycophancy"])
         logger.info(
@@ -555,6 +593,7 @@ def run_generations(
             coherence_limit,
             coefficient,
             STEERING_SCOPE_ALWAYS,
+            steering_direction,
         )
         assert_log_matches_sample_contract(coherence_log, contracts["coherence"])
         generated_rows: list[dict[str, Any]] = []
@@ -572,6 +611,7 @@ def run_generations(
             generated_rows.append(
                 {
                     "coefficient": float(coefficient),
+                    "steering_direction": steering_direction,
                     "evaluation": evaluation,
                     "log": portable_location,
                     "samples": len(log.samples or []),
@@ -656,8 +696,18 @@ def write_sweep_manifest(
         (root / "layer_sweep_manifest.json").write_text(payload, encoding="utf-8")
 
 
-def load_saved_probe(artifact_directory: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def load_saved_probe(
+    artifact_directory: Path,
+    steering_direction: str = STEERING_DIRECTION_PROBE,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Load the small saved state needed to generate from an existing probe."""
+    try:
+        direction_field, scale_field = STEERING_DIRECTION_FIELDS[steering_direction]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown steering direction {steering_direction!r}; expected one of "
+            f"{sorted(STEERING_DIRECTION_FIELDS)}"
+        ) from exc
     metadata_path = artifact_directory / "probe_metadata.json"
     probe_path = artifact_directory / "probe.npz"
     if not metadata_path.is_file() or not probe_path.is_file():
@@ -666,15 +716,15 @@ def load_saved_probe(artifact_directory: Path) -> tuple[dict[str, Any], dict[str
         )
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     with np.load(probe_path, allow_pickle=False) as saved:
-        required = {"direction_unit", "projection_scale"}
+        required = {direction_field, scale_field}
         missing = required.difference(saved.files)
         if missing:
             raise ValueError(
                 f"Saved probe {probe_path} is missing arrays: {sorted(missing)}"
             )
         artifact = {
-            "direction_unit": saved["direction_unit"].copy(),
-            "projection_scale": saved["projection_scale"].copy(),
+            "direction_unit": saved[direction_field].copy(),
+            "projection_scale": saved[scale_field].copy(),
         }
     return artifact, metadata
 
@@ -734,6 +784,7 @@ def resume_layer_generation(
     artifact_root: Path,
     result_root: Path,
     steering_coefficients: tuple[float, ...] | None = None,
+    steering_direction: str = STEERING_DIRECTION_PROBE,
 ) -> None:
     """Generate one layer from its saved probe, reusing interrupted Inspect logs."""
     import torch
@@ -745,7 +796,7 @@ def resume_layer_generation(
     directory_name = layer_directory_name(fraction, target_layer)
     artifact_directory = artifact_root / directory_name
     result_directory = result_root / directory_name
-    artifact, metadata = load_saved_probe(artifact_directory)
+    artifact, metadata = load_saved_probe(artifact_directory, steering_direction)
 
     expected = {
         "model_id": config.MODEL_NAME,
@@ -767,13 +818,14 @@ def resume_layer_generation(
             "Saved probe target_layer_fraction does not match the requested fraction"
         )
     saved_scale = float(artifact["projection_scale"])
-    if not math.isclose(
-        float(metadata.get("projection_scale", float("nan"))),
-        saved_scale,
-        rel_tol=1e-6,
-        abs_tol=1e-8,
+    _, scale_field = STEERING_DIRECTION_FIELDS[steering_direction]
+    metadata_scale = metadata.get(scale_field)
+    if metadata_scale is not None and not math.isclose(
+        float(metadata_scale), saved_scale, rel_tol=1e-6, abs_tol=1e-8
     ):
-        raise ValueError("probe.npz and probe_metadata.json disagree on projection_scale")
+        raise ValueError(
+            f"probe.npz and probe_metadata.json disagree on {scale_field}"
+        )
 
     steering_site = resolve_steering_site(
         model,
@@ -808,6 +860,10 @@ def resume_layer_generation(
     assert_zero_equivalence(
         wrapper, check["input_ids"].to(device), check["attention_mask"].to(device)
     )
+    direction_api_suffix = (
+        "" if steering_direction == STEERING_DIRECTION_PROBE
+        else f"-{steering_direction}"
+    )
     sycophancy_model = make_inspect_model(
         wrapper,
         config.MODEL_NAME,
@@ -816,7 +872,7 @@ def resume_layer_generation(
         config.TOP_P,
         config.SEED,
         config.CHAT_TEMPLATE_KWARGS,
-        api_name=f"local-second-response-layer-{target_layer}",
+        api_name=f"local-second-response{direction_api_suffix}-layer-{target_layer}",
         steering_scope=STEERING_SCOPE_SECOND_ASSISTANT,
     )
     coherence_model = make_inspect_model(
@@ -827,7 +883,7 @@ def resume_layer_generation(
         config.TOP_P,
         config.SEED,
         config.CHAT_TEMPLATE_KWARGS,
-        api_name=f"local-all-responses-layer-{target_layer}",
+        api_name=f"local-all-responses{direction_api_suffix}-layer-{target_layer}",
         steering_scope=STEERING_SCOPE_ALWAYS,
     )
     if steering_coefficients is None:
@@ -839,9 +895,11 @@ def resume_layer_generation(
     sycophancy_limit = int(metadata["sycophancy_sample_limit"])
     coherence_limit = int(metadata["coherence_sample_limit"])
     logger.info(
-        "Resuming fraction=%g (layer=%d) for coefficients %s from %s into %s",
+        "Resuming fraction=%g (layer=%d, direction=%s) for coefficients %s "
+        "from %s into %s",
         fraction,
         target_layer,
+        steering_direction,
         ", ".join(f"{value:g}" for value in coefficients),
         artifact_directory,
         result_directory,
@@ -860,6 +918,7 @@ def resume_layer_generation(
             sycophancy_limit,
             coherence_limit,
             fraction,
+            steering_direction,
         )
         log_stage_done(f"Layer {target_layer}: behavioral generation", started)
     except Exception as exc:
@@ -953,6 +1012,9 @@ def run_layer_experiment(
         "direction_normalization": "L2 unit norm",
         "direction_scale": "sample std (ddof=1) of held-out projections",
         "projection_scale": float(artifact["projection_scale"]),
+        "mean_difference_projection_scale": float(
+            artifact["mean_difference_projection_scale"]
+        ),
         "seed": config.SEED,
         "steering_coefficients": list(config.STEERING_COEFFICIENTS),
         "judge_model": config.JUDGE_MODEL,
@@ -1047,6 +1109,7 @@ def run_layer_experiment(
                 min(config.SYCOPHANCY_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
                 min(config.COHERENCE_SAMPLE_LIMIT, config.RANDOM_CONTROL_SAMPLE_LIMIT),
                 target_layer_fraction,
+                STEERING_DIRECTION_RANDOM_CONTROL,
             )
         finally:
             wrapper.unit_direction = primary
@@ -1177,6 +1240,7 @@ def _resume_generation(
     artifact_root: Path,
     result_root: Path,
     steering_coefficients: tuple[float, ...] | None = None,
+    steering_direction: str = STEERING_DIRECTION_PROBE,
 ) -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -1200,6 +1264,7 @@ def _resume_generation(
             artifact_root,
             result_root,
             steering_coefficients,
+            steering_direction,
         )
     logger.info(
         "Generation resume complete for %d layer(s). Download %s and run "
@@ -1229,6 +1294,7 @@ def resume_main(
     artifact_root: Path,
     result_root: Path,
     steering_coefficients: tuple[float, ...] | None = None,
+    steering_direction: str = STEERING_DIRECTION_PROBE,
 ) -> None:
     """Resume saved layers and report any uncaught error before propagating it."""
     try:
@@ -1241,6 +1307,7 @@ def resume_main(
             artifact_root,
             result_root,
             steering_coefficients,
+            steering_direction,
         )
     except Exception as exc:
         notify(f"run.py resume failed with {type(exc).__name__}: {exc}")
@@ -1285,6 +1352,15 @@ def cli(argv: list[str] | None = None) -> None:
             "entries are preserved and reused."
         ),
     )
+    parser.add_argument(
+        "--steering-direction",
+        choices=tuple(STEERING_DIRECTION_FIELDS),
+        default=STEERING_DIRECTION_PROBE,
+        help=(
+            "Saved activation direction to use during resume generation "
+            f"(default: {STEERING_DIRECTION_PROBE})."
+        ),
+    )
     args = parser.parse_args(argv)
     is_resume = args.resume_generation is not None or args.resume_all
     if not is_resume:
@@ -1298,6 +1374,8 @@ def cli(argv: list[str] | None = None) -> None:
             )
         if args.steering_coefficients is not None:
             parser.error("--steering-coefficients is only valid during resume")
+        if args.steering_direction != STEERING_DIRECTION_PROBE:
+            parser.error("--steering-direction is only valid during resume")
         main()
     else:
         try:
@@ -1313,6 +1391,7 @@ def cli(argv: list[str] | None = None) -> None:
             args.artifacts_dir,
             args.results_dir,
             coefficients,
+            args.steering_direction,
         )
 
 

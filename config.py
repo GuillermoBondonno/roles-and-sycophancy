@@ -5,6 +5,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+"""
+In the remote
+
+python run.py --resume-all \
+    --artifacts-dir artifacts_aug_2_v2_combined \
+    --results-dir results_second_response_only \
+    --steering-coefficients -10 -5 0 5 10
+"""
+
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
 MODEL_NAME = "Qwen/Qwen3-8B"

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import run
@@ -122,6 +123,44 @@ def test_generate_or_resume_task_disables_task_shuffle_override_on_retry(
     assert partial.eval.config.sample_shuffle is False
 
 
+def test_legacy_generation_log_is_probe_direction_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_ai.log
+
+    path = tmp_path / "legacy.eval"
+    path.touch()
+    legacy = SimpleNamespace(
+        eval=SimpleNamespace(
+            task_display_name="sycophancy",
+            task_registry_name=None,
+            task=None,
+            metadata={
+                "steering_coefficient": -3.0,
+                "steering_scope": run.STEERING_SCOPE_SECOND_ASSISTANT,
+            },
+        )
+    )
+    monkeypatch.setattr(inspect_ai.log, "read_eval_log", lambda _path: legacy)
+
+    assert run.existing_generation_logs(
+        tmp_path,
+        "sycophancy",
+        -3.0,
+        run.STEERING_SCOPE_SECOND_ASSISTANT,
+        run.STEERING_DIRECTION_PROBE,
+    ) == [legacy]
+    with pytest.raises(RuntimeError, match="mixing steering directions"):
+        run.existing_generation_logs(
+            tmp_path,
+            "sycophancy",
+            -3.0,
+            run.STEERING_SCOPE_SECOND_ASSISTANT,
+            run.STEERING_DIRECTION_MEAN_DIFFERENCE,
+        )
+
+
 def test_evaluation_sample_contract_rejects_dataset_drift(tmp_path: Path) -> None:
     from inspect_ai.dataset import MemoryDataset, Sample
 
@@ -172,12 +211,12 @@ def test_log_sample_contract_rejects_retry_shuffle() -> None:
 def test_cli_routes_explicit_resume_directories(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[float | None, Path, Path, tuple[float, ...] | None]] = []
+    calls: list[tuple[object, ...]] = []
     monkeypatch.setattr(
         run,
         "resume_main",
-        lambda fraction, artifacts, results, coefficients: calls.append(
-            (fraction, artifacts, results, coefficients)
+        lambda fraction, artifacts, results, coefficients, direction: calls.append(
+            (fraction, artifacts, results, coefficients, direction)
         ),
     )
 
@@ -195,18 +234,19 @@ def test_cli_routes_explicit_resume_directories(
         Path("artifacts_aug_2_v2"),
         Path("results_aug_2_v2"),
         None,
+        run.STEERING_DIRECTION_PROBE,
     )]
 
 
 def test_cli_routes_all_layers_and_explicit_coefficients(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[float | None, Path, Path, tuple[float, ...] | None]] = []
+    calls: list[tuple[object, ...]] = []
     monkeypatch.setattr(
         run,
         "resume_main",
-        lambda fraction, artifacts, results, coefficients: calls.append(
-            (fraction, artifacts, results, coefficients)
+        lambda fraction, artifacts, results, coefficients, direction: calls.append(
+            (fraction, artifacts, results, coefficients, direction)
         ),
     )
 
@@ -231,8 +271,64 @@ def test_cli_routes_all_layers_and_explicit_coefficients(
             Path("artifacts_aug_2_v2_combined"),
             Path("results_aug_2_v2_combined"),
             (-8.0, -6.0, -4.0, -2.0),
+            run.STEERING_DIRECTION_PROBE,
         )
     ]
+
+
+def test_cli_routes_mean_difference_direction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        run,
+        "resume_main",
+        lambda fraction, artifacts, results, coefficients, direction: calls.append(
+            (fraction, artifacts, results, coefficients, direction)
+        ),
+    )
+
+    run.cli([
+        "--resume-all",
+        "--artifacts-dir",
+        "artifacts",
+        "--results-dir",
+        "results_mean_difference",
+        "--steering-direction",
+        "mean-difference",
+        "--steering-coefficients",
+        "-3",
+        "0",
+        "3",
+    ])
+
+    assert calls == [(
+        None,
+        Path("artifacts"),
+        Path("results_mean_difference"),
+        (-3.0, 0.0, 3.0),
+        run.STEERING_DIRECTION_MEAN_DIFFERENCE,
+    )]
+
+
+def test_load_saved_probe_selects_mean_difference_arrays(tmp_path: Path) -> None:
+    (tmp_path / "probe_metadata.json").write_text("{}", encoding="utf-8")
+    np.savez(
+        tmp_path / "probe.npz",
+        direction_unit=np.array([1.0, 0.0], dtype=np.float32),
+        projection_scale=np.array(0.25, dtype=np.float32),
+        mean_difference_direction_unit=np.array([0.0, 1.0], dtype=np.float32),
+        mean_difference_projection_scale=np.array(0.75, dtype=np.float32),
+    )
+
+    artifact, _ = run.load_saved_probe(
+        tmp_path, run.STEERING_DIRECTION_MEAN_DIFFERENCE
+    )
+
+    np.testing.assert_array_equal(
+        artifact["direction_unit"], np.array([0.0, 1.0], dtype=np.float32)
+    )
+    assert float(artifact["projection_scale"]) == pytest.approx(0.75)
 
 
 def test_resume_all_dispatches_every_saved_layer_once(
@@ -252,7 +348,7 @@ def test_resume_all_dispatches_every_saved_layer_once(
         ),
         encoding="utf-8",
     )
-    calls: list[tuple[float, tuple[float, ...] | None]] = []
+    calls: list[tuple[float, tuple[float, ...] | None, str]] = []
     model = object()
     tokenizer = object()
     monkeypatch.setattr(run, "seed_everything", lambda _seed: None)
@@ -268,12 +364,13 @@ def test_resume_all_dispatches_every_saved_layer_once(
         artifacts: Path,
         results: Path,
         coefficients: tuple[float, ...] | None,
+        direction: str,
     ) -> None:
         assert loaded_model is model
         assert loaded_tokenizer is tokenizer
         assert artifacts == artifact_root
         assert results == result_root
-        calls.append((fraction, coefficients))
+        calls.append((fraction, coefficients, direction))
 
     monkeypatch.setattr(
         run,
@@ -289,9 +386,9 @@ def test_resume_all_dispatches_every_saved_layer_once(
     )
 
     assert calls == [
-        (0.25, (-8.0, -6.0)),
-        (0.5, (-8.0, -6.0)),
-        (0.75, (-8.0, -6.0)),
+        (0.25, (-8.0, -6.0), run.STEERING_DIRECTION_PROBE),
+        (0.5, (-8.0, -6.0), run.STEERING_DIRECTION_PROBE),
+        (0.75, (-8.0, -6.0), run.STEERING_DIRECTION_PROBE),
     ]
 
 
