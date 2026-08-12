@@ -1,0 +1,26 @@
+[
+  {
+    "artifacts": "layer_9_fraction_0p25",
+    "decoder_layer_count": 36,
+    "results": "layer_9_fraction_0p25",
+    "status": "generated",
+    "target_layer": 9,
+    "target_layer_fraction": 0.25
+  },
+  {
+    "artifacts": "layer_18_fraction_0p5",
+    "decoder_layer_count": 36,
+    "results": "layer_18_fraction_0p5",
+    "status": "generated",
+    "target_layer": 18,
+    "target_layer_fraction": 0.5
+  },
+  {
+    "artifacts": "layer_27_fraction_0p75",
+    "decoder_layer_count": 36,
+    "results": "layer_27_fraction_0p75",
+    "status": "generated",
+    "target_layer": 27,
+    "target_layer_fraction": 0.75
+  }
+]

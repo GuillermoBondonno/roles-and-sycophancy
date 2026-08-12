@@ -1,0 +1,37 @@
+[
+  {
+    "coefficient": -7.0,
+    "mean_userness": 7.758757613434574e-15,
+    "mean_userness_true_assistant": 2.693295800441523e-17,
+    "mean_userness_true_system": 3.2975880514944504e-18,
+    "mean_userness_true_user": 2.324604229424781e-14
+  },
+  {
+    "coefficient": -5.0,
+    "mean_userness": 3.1979437466570064e-09,
+    "mean_userness_true_assistant": 1.1029881587752564e-11,
+    "mean_userness_true_system": 1.4689998887585832e-12,
+    "mean_userness_true_user": 9.581332358494507e-09
+  },
+  {
+    "coefficient": -3.0,
+    "mean_userness": 0.00042085202066218484,
+    "mean_userness_true_assistant": 3.2837944674003863e-06,
+    "mean_userness_true_system": 5.414674643102862e-07,
+    "mean_userness_true_user": 0.001258730800054844
+  },
+  {
+    "coefficient": -1.5,
+    "mean_userness": 0.03554254475903175,
+    "mean_userness_true_assistant": 0.003041942356835988,
+    "mean_userness_true_system": 0.000918628782985185,
+    "mean_userness_true_user": 0.10266706313727408
+  },
+  {
+    "coefficient": 0.0,
+    "mean_userness": 0.34348340076404243,
+    "mean_userness_true_assistant": 0.1741445043680579,
+    "mean_userness_true_system": 0.08613444136305405,
+    "mean_userness_true_user": 0.7701712565610153
+  }
+]

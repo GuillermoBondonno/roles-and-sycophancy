@@ -1,0 +1,156 @@
+{
+  "confusion_matrix": [
+    [
+      4565,
+      739,
+      1048
+    ],
+    [
+      919,
+      3764,
+      1669
+    ],
+    [
+      1074,
+      1178,
+      4100
+    ]
+  ],
+  "per_role_one_vs_rest_accuracy": {
+    "assistant": 0.7635915197313182,
+    "system": 0.7392422334172963,
+    "user": 0.8016372795969773
+  },
+  "per_role_recall": {
+    "assistant": 0.5925692695214105,
+    "system": 0.6454659949622166,
+    "user": 0.7186712846347607
+  },
+  "regularization_search": [
+    {
+      "C": 10000.0,
+      "lambda": 0.0001,
+      "validation_accuracy": 0.6510285474391267,
+      "validation_log_loss": 0.9096513390541077
+    },
+    {
+      "C": 1000.0,
+      "lambda": 0.001,
+      "validation_accuracy": 0.6514483627204031,
+      "validation_log_loss": 0.9083206057548523
+    },
+    {
+      "C": 100.0,
+      "lambda": 0.01,
+      "validation_accuracy": 0.6512384550797649,
+      "validation_log_loss": 0.9092087745666504
+    },
+    {
+      "C": 10.0,
+      "lambda": 0.1,
+      "validation_accuracy": 0.6517107472712007,
+      "validation_log_loss": 0.9079766869544983
+    },
+    {
+      "C": 1.0,
+      "lambda": 1.0,
+      "validation_accuracy": 0.652235516372796,
+      "validation_log_loss": 0.899713933467865
+    },
+    {
+      "C": 0.1,
+      "lambda": 10.0,
+      "validation_accuracy": 0.6513434089000839,
+      "validation_log_loss": 0.857429027557373
+    },
+    {
+      "C": 0.01,
+      "lambda": 100.0,
+      "validation_accuracy": 0.6500839630562553,
+      "validation_log_loss": 0.7926113605499268
+    },
+    {
+      "C": 0.001,
+      "lambda": 1000.0,
+      "validation_accuracy": 0.6360726280436608,
+      "validation_log_loss": 0.8436297178268433
+    }
+  ],
+  "selected_regularization_lambda": 1.0,
+  "selected_sklearn_C": 1.0,
+  "userness_diagnostic_monotonic": true,
+  "userness_steering_diagnostic": [
+    {
+      "coefficient": -7.0,
+      "mean_userness": 1.0277487675937308e-09,
+      "mean_userness_true_assistant": 1.0341068708413225e-11,
+      "mean_userness_true_system": 6.9821805943917784e-12,
+      "mean_userness_true_user": 3.0659230534783878e-09
+    },
+    {
+      "coefficient": -5.0,
+      "mean_userness": 3.022661144457365e-06,
+      "mean_userness_true_assistant": 3.0686919246281823e-08,
+      "mean_userness_true_system": 2.0724229309839055e-08,
+      "mean_userness_true_user": 9.016572284815973e-06
+    },
+    {
+      "coefficient": -3.0,
+      "mean_userness": 0.0022078868630301496,
+      "mean_userness_true_assistant": 7.68774532770648e-05,
+      "mean_userness_true_system": 5.8276412083271385e-05,
+      "mean_userness_true_user": 0.006488506723730113
+    },
+    {
+      "coefficient": -1.5,
+      "mean_userness": 0.05117378597800972,
+      "mean_userness_true_assistant": 0.005848573761798822,
+      "mean_userness_true_system": 0.006750751172972956,
+      "mean_userness_true_user": 0.14092203299925737
+    },
+    {
+      "coefficient": 0.0,
+      "mean_userness": 0.33934173630370473,
+      "mean_userness_true_assistant": 0.15982832185669324,
+      "mean_userness_true_system": 0.18335228922442778,
+      "mean_userness_true_user": 0.6748445978299931
+    }
+  ],
+  "validation_accuracy": 0.652235516372796,
+  "validation_log_loss": 0.899713933467865,
+  "validation_userness_distributions": {
+    "assistant": {
+      "mean": 0.159828320145607,
+      "quantiles": [
+        0.00024317949792020956,
+        0.0046014555264264345,
+        0.030634155496954918,
+        0.1841108426451683,
+        0.8238578498363492
+      ],
+      "std": 0.2582041621208191
+    },
+    "system": {
+      "mean": 0.1833523064851761,
+      "quantiles": [
+        0.00021816058069816792,
+        0.005371899576857686,
+        0.03959367796778679,
+        0.23276066035032272,
+        0.8685959070920943
+      ],
+      "std": 0.2755070626735687
+    },
+    "user": {
+      "mean": 0.6748446822166443,
+      "quantiles": [
+        0.02471336256712675,
+        0.3587208092212677,
+        0.8505877554416656,
+        0.9838300496339798,
+        0.9994673669338227
+      ],
+      "std": 0.35381612181663513
+    }
+  }
+}

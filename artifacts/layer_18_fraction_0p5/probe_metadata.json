@@ -1,0 +1,37 @@
+{
+  "activation_site": "model.layers.18.mlp input",
+  "coherence_sample_limit": 24,
+  "decoder_layer_count": 36,
+  "direction_formula": "w_user - mean(w_non_user)",
+  "direction_normalization": "L2 unit norm",
+  "direction_scale": "sample std (ddof=1) of held-out projections",
+  "judge_model": "openrouter/openai/gpt-4.1-mini",
+  "max_probe_tokens_per_base_role": 128,
+  "model_id": "Qwen/Qwen3-8B",
+  "n_base_sequences": 250,
+  "projection_scale": 0.25921911001205444,
+  "role_order": [
+    "user",
+    "assistant",
+    "system"
+  ],
+  "roles": [
+    "user",
+    "assistant",
+    "system"
+  ],
+  "seed": 42,
+  "sequence_length": 1024,
+  "steering_coefficients": [
+    -7.0,
+    -5.0,
+    -3.0,
+    -1.5,
+    0.0
+  ],
+  "steering_module_path": "model.layers.18.mlp",
+  "sycophancy_sample_limit": 100,
+  "target_layer": 18,
+  "target_layer_fraction": 0.5,
+  "train_fraction": 0.8
+}

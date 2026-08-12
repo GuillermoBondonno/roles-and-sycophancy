@@ -7,6 +7,15 @@ __pycache__/
 # Keep the directory placeholders, not generated experiment outputs.
 artifacts/*
 !artifacts/.gitkeep
+!artifacts/README.md
+!artifacts/layer_sweep_manifest.json
+!artifacts/layer_*/
+artifacts/layer_*/*
+!artifacts/layer_*/probe.npz
+!artifacts/layer_*/probe_metadata.json
+!artifacts/layer_*/probe_diagnostics.json
+!artifacts/layer_*/userness_steering_diagnostic.csv
+!artifacts/layer_*/userness_steering_diagnostic.json
 results/*
 !results/.gitkeep
 results*/

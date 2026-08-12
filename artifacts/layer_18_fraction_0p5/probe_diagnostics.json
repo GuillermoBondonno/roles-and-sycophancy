@@ -1,0 +1,156 @@
+{
+  "confusion_matrix": [
+    [
+      5220,
+      685,
+      447
+    ],
+    [
+      1026,
+      3222,
+      2104
+    ],
+    [
+      509,
+      1196,
+      4647
+    ]
+  ],
+  "per_role_one_vs_rest_accuracy": {
+    "assistant": 0.7370382031905961,
+    "system": 0.7766582703610412,
+    "user": 0.860044080604534
+  },
+  "per_role_recall": {
+    "assistant": 0.5072418136020151,
+    "system": 0.7315806045340051,
+    "user": 0.8217884130982368
+  },
+  "regularization_search": [
+    {
+      "C": 10000.0,
+      "lambda": 0.0001,
+      "validation_accuracy": 0.684718723761545,
+      "validation_log_loss": 0.880598247051239
+    },
+    {
+      "C": 1000.0,
+      "lambda": 0.001,
+      "validation_accuracy": 0.6845088161209067,
+      "validation_log_loss": 0.8800821900367737
+    },
+    {
+      "C": 100.0,
+      "lambda": 0.01,
+      "validation_accuracy": 0.6849811083123426,
+      "validation_log_loss": 0.882079541683197
+    },
+    {
+      "C": 10.0,
+      "lambda": 0.1,
+      "validation_accuracy": 0.6861880772460117,
+      "validation_log_loss": 0.8771613836288452
+    },
+    {
+      "C": 1.0,
+      "lambda": 1.0,
+      "validation_accuracy": 0.6856633081444165,
+      "validation_log_loss": 0.862382173538208
+    },
+    {
+      "C": 0.1,
+      "lambda": 10.0,
+      "validation_accuracy": 0.6868702770780857,
+      "validation_log_loss": 0.7917537689208984
+    },
+    {
+      "C": 0.01,
+      "lambda": 100.0,
+      "validation_accuracy": 0.6861880772460117,
+      "validation_log_loss": 0.7098497152328491
+    },
+    {
+      "C": 0.001,
+      "lambda": 1000.0,
+      "validation_accuracy": 0.6654596977329975,
+      "validation_log_loss": 0.7718924880027771
+    }
+  ],
+  "selected_regularization_lambda": 10.0,
+  "selected_sklearn_C": 0.1,
+  "userness_diagnostic_monotonic": true,
+  "userness_steering_diagnostic": [
+    {
+      "coefficient": -7.0,
+      "mean_userness": 7.758757613434574e-15,
+      "mean_userness_true_assistant": 2.693295800441523e-17,
+      "mean_userness_true_system": 3.2975880514944504e-18,
+      "mean_userness_true_user": 2.324604229424781e-14
+    },
+    {
+      "coefficient": -5.0,
+      "mean_userness": 3.1979437466570064e-09,
+      "mean_userness_true_assistant": 1.1029881587752564e-11,
+      "mean_userness_true_system": 1.4689998887585832e-12,
+      "mean_userness_true_user": 9.581332358494507e-09
+    },
+    {
+      "coefficient": -3.0,
+      "mean_userness": 0.00042085202066218484,
+      "mean_userness_true_assistant": 3.2837944674003863e-06,
+      "mean_userness_true_system": 5.414674643102862e-07,
+      "mean_userness_true_user": 0.001258730800054844
+    },
+    {
+      "coefficient": -1.5,
+      "mean_userness": 0.03554254475903175,
+      "mean_userness_true_assistant": 0.003041942356835988,
+      "mean_userness_true_system": 0.000918628782985185,
+      "mean_userness_true_user": 0.10266706313727408
+    },
+    {
+      "coefficient": 0.0,
+      "mean_userness": 0.34348340076404243,
+      "mean_userness_true_assistant": 0.1741445043680579,
+      "mean_userness_true_system": 0.08613444136305405,
+      "mean_userness_true_user": 0.7701712565610153
+    }
+  ],
+  "validation_accuracy": 0.6868702770780857,
+  "validation_log_loss": 0.7917537689208984,
+  "validation_userness_distributions": {
+    "assistant": {
+      "mean": 0.17414450645446777,
+      "quantiles": [
+        4.354248576419196e-05,
+        0.0023135392693802714,
+        0.02429297100752592,
+        0.20643502473831177,
+        0.9044855684041977
+      ],
+      "std": 0.2833920419216156
+    },
+    "system": {
+      "mean": 0.08613444119691849,
+      "quantiles": [
+        4.5607586685036955e-07,
+        8.152074224199168e-05,
+        0.0018156104488298297,
+        0.03330788668245077,
+        0.6575051754713055
+      ],
+      "std": 0.2103646695613861
+    },
+    "user": {
+      "mean": 0.7701712846755981,
+      "quantiles": [
+        0.047156349010765555,
+        0.638630747795105,
+        0.9414042532444,
+        0.9939510226249695,
+        0.9998528063297272
+      ],
+      "std": 0.3129827082157135
+    }
+  }
+}
