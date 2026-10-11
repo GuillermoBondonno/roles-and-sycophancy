@@ -43,7 +43,6 @@ from utils import send_ntfy_message
 
 
 logger = logging.getLogger(__name__)
-NTFY_TOPIC = "roles_and_sycophancy_experiment_rbi24u"
 SAMPLE_CONTRACT_FILENAME = "evaluation_sample_contract.json"
 STEERING_DIRECTION_PROBE = "probe"
 STEERING_DIRECTION_MEAN_DIFFERENCE = "mean-difference"
@@ -64,8 +63,10 @@ def logged_steering_direction(metadata: dict[str, Any]) -> str:
 
 def notify(message: str) -> None:
     """Send a run notification without allowing ntfy failures to stop the run."""
+    if not config.NTFY_TOPIC:
+        return
     try:
-        send_ntfy_message(message, topic=NTFY_TOPIC)
+        send_ntfy_message(message, topic=config.NTFY_TOPIC)
     except Exception:
         logger.exception("Failed to send ntfy notification: %s", message)
 

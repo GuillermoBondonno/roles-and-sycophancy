@@ -185,6 +185,57 @@ def create_dashboard(rows: list[dict[str, Any]], title: str) -> Any:
     return _create_single_dashboard(rows, title)
 
 
+def create_apology_rate_plot(rows: list[dict[str, Any]], title: str) -> Any:
+    """Create a single comparison plot of apology rate across all layers."""
+    from itertools import cycle
+
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import PercentFormatter
+
+    plt.rcParams.update(
+        {
+            "font.family": "DejaVu Sans",
+            "font.size": 10.5,
+            "axes.titlesize": 15,
+            "axes.titleweight": "bold",
+            "axes.labelsize": 11,
+            "figure.facecolor": "white",
+            "savefig.facecolor": "white",
+            "svg.hashsalt": "roles-and-sycophancy",
+        }
+    )
+    figure, axis = plt.subplots(figsize=(8.2, 4.8))
+    colors = ("#4477AA", "#EE6677", "#228833")
+    all_rates: list[float] = []
+    for (label, group_rows), color in zip(_layer_groups(rows), cycle(colors)):
+        coefficients = [row["coefficient"] for row in group_rows]
+        rates = [row["sycophancy_apologize_rate"] for row in group_rows]
+        all_rates.extend(rates)
+        axis.plot(
+            coefficients,
+            rates,
+            marker="o",
+            linewidth=2.1,
+            markersize=6,
+            color=color,
+            label=label,
+        )
+
+    axis.axvline(0, color="#666666", linewidth=1, linestyle="--", alpha=0.75)
+    axis.set(
+        title=title,
+        xlabel="Steering coefficient α",
+        ylabel="Apology rate",
+        xticks=sorted({row["coefficient"] for row in rows}),
+        ylim=(0, min(1.0, max(all_rates) + 0.025)),
+    )
+    axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+    axis.legend(frameon=False, ncol=min(3, len(_layer_groups(rows))), loc="upper left")
+    _style_axis(axis)
+    figure.tight_layout()
+    return figure
+
+
 def _create_single_dashboard(rows: list[dict[str, Any]], title: str) -> Any:
     """Create and return a dashboard for one target layer."""
     import matplotlib.pyplot as plt
@@ -453,6 +504,11 @@ def main() -> None:
     )
     parser.add_argument("--title", help="Custom figure title")
     parser.add_argument(
+        "--apology-only",
+        action="store_true",
+        help="Create one apology-rate comparison plot instead of dashboards.",
+    )
+    parser.add_argument(
         "--dpi", type=int, default=200, help="Output DPI (default: 200)"
     )
     args = parser.parse_args()
@@ -468,6 +524,16 @@ def main() -> None:
     groups = _layer_groups(rows)
     base_title = args.title or default_title(args.results)
     import matplotlib.pyplot as plt
+
+    if args.apology_only:
+        output = args.output or result_directory / "apology_rate_plot.png"
+        figure = create_apology_rate_plot(rows, base_title)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        metadata = {"Date": None} if output.suffix.lower() == ".svg" else {}
+        figure.savefig(output, dpi=args.dpi, bbox_inches="tight", metadata=metadata)
+        print(f"Saved plot to {output}")
+        plt.close(figure)
+        return
 
     for label, group_rows in groups:
         output = _output_path(

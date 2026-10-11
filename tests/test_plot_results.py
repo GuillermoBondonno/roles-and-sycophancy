@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pytest
 
-from plot_results import create_dashboard, load_summary, main
+from plot_results import create_apology_rate_plot, create_dashboard, load_summary, main
 
 
 def _summary_row(coefficient: float) -> dict[str, float]:
@@ -77,6 +77,27 @@ def test_create_dashboard_can_be_saved(tmp_path: Path) -> None:
         [_summary_row(-1.0), _summary_row(0.0)], "Test Experiment"
     )
     output = tmp_path / "plot.png"
+    figure.savefig(output)
+    plt.close(figure)
+
+    assert output.stat().st_size > 0
+
+
+def test_create_apology_rate_plot_can_be_saved(tmp_path: Path) -> None:
+    rows = []
+    for target_layer in (9, 18, 27):
+        for coefficient in (-1.0, 0.0):
+            row = _summary_row(coefficient)
+            row.update(
+                {
+                    "experiment": f"layer_{target_layer}",
+                    "target_layer": target_layer,
+                    "target_layer_fraction": target_layer / 36,
+                }
+            )
+            rows.append(row)
+    figure = create_apology_rate_plot(rows, "Apology rate")
+    output = tmp_path / "apology_rate.svg"
     figure.savefig(output)
     plt.close(figure)
 

@@ -3,6 +3,18 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+secrets*.json
+
+# Local research scratch files and duplicated raw data.
+artifacts_*/
+/TODO.txt
+/layer_27_bug_info.md
+/docs/post-outline.md
 
 # Keep the directory placeholders, not generated experiment outputs.
 artifacts/*
@@ -16,6 +28,7 @@ artifacts/layer_*/*
 !artifacts/layer_*/probe_diagnostics.json
 !artifacts/layer_*/userness_steering_diagnostic.csv
 !artifacts/layer_*/userness_steering_diagnostic.json
-results/*
-!results/.gitkeep
-results*/
+/results*/
+!/results/
+/results/*
+!/results/.gitkeep

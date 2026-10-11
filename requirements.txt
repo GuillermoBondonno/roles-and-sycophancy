@@ -9,5 +9,6 @@ inspect-ai>=0.3.249,<0.4
 inspect-evals>=0.16.0,<0.17
 openai>=2,<3
 python-dotenv>=1,<2
+requests>=2.32,<3
 tqdm>=4.66,<5
 pytest>=8

@@ -4,7 +4,12 @@ import numpy as np
 import pytest
 
 from evals import parse_judge_json
-from probe import candidate_user_direction, content_token_indices, projection_scale
+from probe import (
+    candidate_user_direction,
+    content_token_indices,
+    projection_scale,
+    train_probe,
+)
 
 
 def test_content_span_excludes_native_template_tokens() -> None:
@@ -64,3 +69,25 @@ def test_judge_parser_validates_all_dimensions() -> None:
     )
     assert parsed["grammar"] == 5
     assert parsed["reason"] == "clear"
+
+
+def test_probe_monotonicity_is_independent_of_coefficient_order() -> None:
+    rng = np.random.default_rng(42)
+    centers = np.array([[3.0, 0.0], [-3.0, 0.0], [0.0, 3.0]])
+    x = np.concatenate([center + rng.normal(0, 0.2, (12, 2)) for center in centers])
+    y = np.repeat(np.arange(3), 12)
+    train = np.tile([True] * 8 + [False] * 4, 3)
+    _, diagnostics = train_probe(
+        x[train],
+        y[train],
+        x[~train],
+        y[~train],
+        ("user", "assistant", "system"),
+        (1.0,),
+        (1.0, -1.0, 0.0),
+        42,
+    )
+    assert diagnostics["userness_diagnostic_monotonic"] is True
+    assert [
+        row["coefficient"] for row in diagnostics["userness_steering_diagnostic"]
+    ] == [1.0, -1.0, 0.0]

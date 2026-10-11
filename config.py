@@ -1,18 +1,10 @@
-"""Editable experiment settings. There is deliberately no CLI layer."""
+"""Editable defaults for fresh experiments; resume options live in run.py."""
 
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-
-"""
-In the remote
-
-python run.py --resume-all \
-    --artifacts-dir artifacts_aug_2_v2_combined \
-    --results-dir results_second_response_only \
-    --steering-coefficients -10 -5 0 5 10
-"""
 
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
@@ -35,11 +27,11 @@ TOKENIZER_LOAD_KWARGS = {"use_fast": True}
 MODEL_LOAD_KWARGS = {}
 CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 
-N_BASE_SEQUENCES = 150
+N_BASE_SEQUENCES = 250
 SEQUENCE_LENGTH = 1_024
 TRAIN_FRACTION = 0.8
 REGULARIZATION_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3)
-STEERING_COEFFICIENTS = (-10.0, -5.0, 0.0, 5.0, 10.0)
+STEERING_COEFFICIENTS = (-5.0, -2.5, 0.0, 2.5, 5.0)
 MAX_NEW_TOKENS = 384
 SEED = 42
 
@@ -54,6 +46,9 @@ SYCOPHANCY_SAMPLE_LIMIT = 100
 # initial request for transient model API failures (including HTTP 429 and 5xx).
 MODEL_API_MAX_RETRIES = 7
 MODEL_API_TIMEOUT = None
+
+# Notifications are opt-in. Never send another user's runs to a shared topic.
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
 
 # Explicit, deterministic deviation from the paper: cap the token-level probe
 # examples per base sequence and role so the CPU logistic regression stays lean.

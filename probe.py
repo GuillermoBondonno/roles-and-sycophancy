@@ -416,7 +416,11 @@ def train_probe(
                 probs[y_validation == role_index, user_index].mean()
             )
         diagnostic_rows.append(row)
-    means = [row["mean_userness"] for row in diagnostic_rows]
+    # Check increasing alpha, even when callers supply coefficients out of order.
+    means = [
+        row["mean_userness"]
+        for row in sorted(diagnostic_rows, key=lambda item: item["coefficient"])
+    ]
     monotonic = all(right >= left - 1e-10 for left, right in zip(means, means[1:]))
 
     per_role_accuracy = {

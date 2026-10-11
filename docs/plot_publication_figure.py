@@ -26,6 +26,7 @@ def main() -> None:
     }
 
     plt.style.use("seaborn-v0_8-whitegrid")
+    plt.rcParams["svg.hashsalt"] = "roles-and-sycophancy"
     figure, axis = plt.subplots(figsize=(8.2, 4.8))
     colors = ("#4477AA", "#EE6677", "#228833")
     for (label, values), color in zip(series.items(), colors, strict=True):
